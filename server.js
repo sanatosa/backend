@@ -53,7 +53,7 @@ const diccionario_traduccion = {
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
   Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
+  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
@@ -90,8 +90,8 @@ app.get('/api/grupos', async (req, res) => {
 });
 
 // Obtener la primera foto de un artículo en Buffer (jpeg)
+// ¡SIEMPRE usa usuario español!
 async function obtenerFotoArticulo(codigo) {
-  // SIEMPRE usa el usuario español, para evitar problemas de permisos
   const usuario = usuarios_api["Español"].usuario;
   const password = usuarios_api["Español"].password;
   try {
@@ -303,16 +303,17 @@ async function generarExcelAsync(params, jobId) {
       }
       ws.addRow(fila);
 
-      // Obtener imagen usando SIEMPRE usuario español
+      // --- OJO: SIEMPRE usuario español para las fotos ---
       const fotoBuffer = await obtenerFotoArticulo(art.codigo);
       if (fotoBuffer) {
         try {
-          // Redimensionar y comprimir a 110x110 JPEG calidad 60
-          const img = await Jimp.read(fotoBuffer);
-          img.resize(110, 110).quality(60);
+          // Redimensionar, recortar y comprimir a 110x110 JPEG calidad 60
+          let img = await Jimp.read(fotoBuffer);
+          img.cover(110, 110); // cover recorta y ajusta al tamaño exacto SIN deformar
+          img.quality(60);
           const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
 
-          // DEBUG: log tamaño antes y después
+          // DEBUG: log tamaño antes y después (solo si lo necesitas)
           // console.log(`Foto ${art.codigo}: original ${fotoBuffer.length} bytes, mini ${miniBuffer.length} bytes`);
 
           const imageId = workbook.addImage({
