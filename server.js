@@ -6,6 +6,7 @@ const ExcelJS = require('exceljs');
 const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const Jimp = require('jimp');
+const pLimit = require('p-limit');
 
 const app = express();
 app.use(cors());
@@ -89,8 +90,7 @@ app.get('/api/grupos', async (req, res) => {
   }
 });
 
-// Obtener la primera foto de un artículo en Buffer (jpeg)
-// ¡SIEMPRE usa usuario español!
+// Obtener la primera foto de un artículo en Buffer (jpeg) usando SIEMPRE usuario español
 async function obtenerFotoArticulo(codigo) {
   const usuario = usuarios_api["Español"].usuario;
   const password = usuarios_api["Español"].password;
@@ -163,7 +163,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
 // -------- GENERADOR EXCEL ASÍNCRONO -----------
 async function generarExcelAsync(params, jobId) {
   try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400 } = params;
+    const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400, sinImagenes = false } = params;
 
     // 1. Leer grupos.xlsx desde GitHub
     let responseGrupos;
@@ -285,50 +285,73 @@ async function generarExcelAsync(params, jobId) {
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
-    // 8. Añadir filas y descargar imágenes de la API oficial
-    for (let [i, art] of articulos.entries()) {
-      let fila = [];
-      for (let c of campos) {
-        let valor = art[c] ?? "";
-        if (c === "precioVenta") {
+    // 8. Añadir filas y procesar imágenes según sinImagenes
+    if (sinImagenes) {
+      for (let [i, art] of articulos.entries()) {
+        let fila = [];
+        for (let c of campos) {
+          let valor = art[c] ?? "";
+          if (c === "precioVenta") {
+            try {
+              if (descuento > 0 && !articulos_sin_descuento.has(art.codigo)) {
+                valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
+              } else {
+                valor = parseFloat(valor);
+              }
+            } catch { }
+          }
+          fila.push(valor);
+        }
+        ws.addRow(fila);
+        jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
+      }
+    } else {
+      // CON imágenes (paralelismo)
+      const limit = pLimit(8); // máximo 8 imágenes en paralelo
+
+      // Primero añade todas las filas
+      for (let [i, art] of articulos.entries()) {
+        let fila = [];
+        for (let c of campos) {
+          let valor = art[c] ?? "";
+          if (c === "precioVenta") {
+            try {
+              if (descuento > 0 && !articulos_sin_descuento.has(art.codigo)) {
+                valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
+              } else {
+                valor = parseFloat(valor);
+              }
+            } catch { }
+          }
+          fila.push(valor);
+        }
+        ws.addRow(fila);
+      }
+
+      // Ahora procesa imágenes en paralelo
+      await Promise.all(articulos.map((art, i) => limit(async () => {
+        const fotoBuffer = await obtenerFotoArticulo(art.codigo);
+        if (fotoBuffer) {
           try {
-            if (descuento > 0 && !articulos_sin_descuento.has(art.codigo)) {
-              valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
-            } else {
-              valor = parseFloat(valor);
-            }
-          } catch { }
+            let img = await Jimp.read(fotoBuffer);
+            img.cover(110, 110);
+            img.quality(60);
+            const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
+
+            const imageId = workbook.addImage({
+              buffer: miniBuffer,
+              extension: 'jpeg'
+            });
+            ws.addImage(imageId, {
+              tl: { col: campos.length - 1, row: i + 1 },
+              ext: { width: 110, height: 110 }
+            });
+          } catch (e) {
+            console.log(`Error procesando imagen ${art.codigo}:`, e.message);
+          }
         }
-        fila.push(valor);
-      }
-      ws.addRow(fila);
-
-      // --- OJO: SIEMPRE usuario español para las fotos ---
-      const fotoBuffer = await obtenerFotoArticulo(art.codigo);
-      if (fotoBuffer) {
-        try {
-          // Redimensionar, recortar y comprimir a 110x110 JPEG calidad 60
-          let img = await Jimp.read(fotoBuffer);
-          img.cover(110, 110); // cover recorta y ajusta al tamaño exacto SIN deformar
-          img.quality(60);
-          const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-
-          // DEBUG: log tamaño antes y después (solo si lo necesitas)
-          // console.log(`Foto ${art.codigo}: original ${fotoBuffer.length} bytes, mini ${miniBuffer.length} bytes`);
-
-          const imageId = workbook.addImage({
-            buffer: miniBuffer,
-            extension: 'jpeg'
-          });
-          ws.addImage(imageId, {
-            tl: { col: campos.length - 1, row: i + 1 },
-            ext: { width: 110, height: 110 }
-          });
-        } catch (e) {
-          console.log(`Error procesando imagen ${art.codigo}:`, e.message);
-        }
-      }
-      jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
+        jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
+      })));
     }
 
     // 9. Formato de filas y celdas
@@ -350,8 +373,8 @@ async function generarExcelAsync(params, jobId) {
     }
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
-    jobs[jobId].filename = `listado_${grupo}_${idioma}.xlsx`;
-    console.log(`[${new Date().toISOString()}] Terminado jobId ${jobId} (${articulos.length} artículos)`);
+    jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
+    console.log(`[${new Date().toISOString()}] Terminado jobId ${jobId} (${articulos.length} artículos, ${sinImagenes ? 'sin imágenes' : 'con imágenes'})`);
   } catch (err) {
     console.error(err);
     jobs[jobId].error = "Error generando el Excel (excepción interna).";
