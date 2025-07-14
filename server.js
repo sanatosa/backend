@@ -5,6 +5,7 @@ const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const https = require('https');
 const { v4: uuidv4 } = require('uuid');
+const Jimp = require('jimp');
 
 const app = express();
 app.use(cors());
@@ -301,16 +302,21 @@ async function generarExcelAsync(params, jobId) {
 
       // Obtener imagen desde la API de fotos oficial
       const fotoBuffer = await obtenerFotoArticulo(art.codigo, usuario, password);
-      if (fotoBuffer) {
-        const imageId = workbook.addImage({
-          buffer: fotoBuffer,
-          extension: 'jpeg'
-        });
-        ws.addImage(imageId, {
-          tl: { col: campos.length - 1, row: i + 1 },
-          ext: { width: 110, height: 110 }
-        });
-      }
+if (fotoBuffer) {
+  // REDIMENSIONAR Y COMPRIMIR como en Python
+  const img = await Jimp.read(fotoBuffer);
+  img.resize(110, 110).quality(60); // Igual que tu script Python
+  const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
+
+  const imageId = workbook.addImage({
+    buffer: miniBuffer,
+    extension: 'jpeg'
+  });
+  ws.addImage(imageId, {
+    tl: { col: campos.length - 1, row: i + 1 },
+    ext: { width: 110, height: 110 }
+  });
+}
       jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
     }
 
