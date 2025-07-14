@@ -4,6 +4,7 @@ const cors = require('cors');
 const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const https = require('https');
+const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 app.use(cors());
@@ -93,10 +94,46 @@ async function obtenerFotoArticulo(codigo, usuario, password) {
   }
 }
 
-// --- BLOQUE PRINCIPAL: GESTOR DE EXCEL ---
-async function generaExcel(req, res) {
+// ---- GESTIÓN DE JOBS Y PROGRESO EN MEMORIA ----
+const jobs = {}; // jobId: { progress, buffer, error, filename }
+
+app.post('/api/genera-excel-final-async', async (req, res) => {
+  const jobId = uuidv4();
+  jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null };
+
+  // Inicia la generación en segundo plano (no esperes, responde ya)
+  generarExcelAsync(req.body, jobId);
+
+  res.json({ jobId });
+});
+
+// Endpoint para consultar progreso
+app.get('/api/progreso/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  if (!jobs[jobId]) return res.status(404).json({ error: 'Trabajo no encontrado' });
+  res.json({
+    progress: jobs[jobId].progress,
+    error: jobs[jobId].error,
+    filename: jobs[jobId].filename
+  });
+});
+
+// Endpoint para descargar el archivo generado
+app.get('/api/descarga-excel/:jobId', (req, res) => {
+  const { jobId } = req.params;
+  const job = jobs[jobId];
+  if (!job || !job.buffer) {
+    return res.status(404).send('Archivo no disponible.');
+  }
+  res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`);
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.send(job.buffer);
+});
+
+// -------- GENERADOR EXCEL ASÍNCRONO -----------
+async function generarExcelAsync(params, jobId) {
   try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400 } = req.body;
+    const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400 } = params;
 
     // 1. Leer grupos.xlsx desde GitHub
     const responseGrupos = await axios.get(
@@ -110,7 +147,9 @@ async function generaExcel(req, res) {
     // 2. Saca los códigos del grupo seleccionado
     const codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
     if (!codigosGrupo.length) {
-      return res.status(404).json({ error: "No hay artículos para ese grupo." });
+      jobs[jobId].error = "No hay artículos para ese grupo.";
+      jobs[jobId].progress = 100;
+      return;
     }
 
     // 3. Llama a la API de Atosa con usuario y password según idioma
@@ -135,7 +174,9 @@ async function generaExcel(req, res) {
     articulos = articulos.slice(0, maxFilas);
 
     if (!articulos.length) {
-      return res.status(404).json({ error: "No hay artículos que coincidan con el filtro." });
+      jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
+      jobs[jobId].progress = 100;
+      return;
     }
 
     // 6. Calcula artículos sin descuento (como en tu script)
@@ -218,6 +259,8 @@ async function generaExcel(req, res) {
           ext: { width: 110, height: 110 }
         });
       }
+      // Actualiza progreso (80% del total)
+      jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
     }
 
     // 9. Formato de filas y celdas
@@ -228,23 +271,17 @@ async function generaExcel(req, res) {
       else row.font = { size: 13 };
     });
 
-    // 10. Devuelve el archivo Excel
-    res.setHeader('Content-Disposition', `attachment; filename="listado_${grupo}_${idioma}.xlsx"`);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    await workbook.xlsx.write(res);
-    res.end();
-
+    // 10. Devuelve el archivo Excel (guarda en memoria)
+    const buffer = await workbook.xlsx.writeBuffer();
+    jobs[jobId].buffer = Buffer.from(buffer);
+    jobs[jobId].progress = 100;
+    jobs[jobId].filename = `listado_${grupo}_${idioma}.xlsx`;
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: "Error generando el Excel." });
+    jobs[jobId].error = "Error generando el Excel.";
+    jobs[jobId].progress = 100;
   }
 }
-
-// Endpoint principal
-app.post('/api/genera-excel-final', generaExcel);
-
-// Alias para compatibilidad frontend antiguo
-app.post('/api/genera-excel', generaExcel);
 
 // Endpoint de prueba para saber si el backend está OK
 app.get('/', (req, res) => {
