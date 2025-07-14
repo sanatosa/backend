@@ -70,14 +70,25 @@ app.get('/grupos.xlsx', async (req, res) => {
   }
 });
 
-// Descarga imagen desde URL y la devuelve como Buffer
-async function descargarImagen(url) {
-  if (!url) return null;
+// Obtener la primera foto de un artículo en Buffer (jpeg)
+async function obtenerFotoArticulo(codigo, usuario, password) {
   try {
-    const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
-    return Buffer.from(response.data, 'binary');
+    const fotoResp = await axios.get(
+      `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
+      {
+        auth: { username: usuario, password: password },
+        timeout: 10000,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      }
+    );
+    const fotos = fotoResp.data.fotos;
+    if (Array.isArray(fotos) && fotos.length > 0) {
+      // Devuelve buffer de la primera foto (JPG)
+      return Buffer.from(fotos[0], 'base64');
+    }
+    return null;
   } catch (e) {
-    console.log('No se pudo descargar imagen:', url);
+    console.log(`No se pudo obtener foto para ${codigo}:`, e.message);
     return null;
   }
 }
@@ -176,7 +187,7 @@ async function generaExcel(req, res) {
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
-    // 8. Añadir filas y descargar imágenes
+    // 8. Añadir filas y descargar imágenes de la API oficial
     for (let [i, art] of articulos.entries()) {
       let fila = [];
       for (let c of campos) {
@@ -194,26 +205,18 @@ async function generaExcel(req, res) {
       }
       ws.addRow(fila);
 
-      // Añadir imagen en la celda correspondiente (si hay URL en 'imagen')
-      const urlImagen = art.imagen;
-      if (urlImagen) {
-        try {
-          const imgBuffer = await descargarImagen(urlImagen);
-          if (imgBuffer) {
-            const ext = urlImagen.toLowerCase().endsWith('.png') ? 'png' : 'jpeg';
-            const imageId = workbook.addImage({
-              buffer: imgBuffer,
-              extension: ext
-            });
-            // Columna imagen (última): campos.length - 1
-            ws.addImage(imageId, {
-              tl: { col: campos.length - 1, row: i + 1 },
-              ext: { width: 110, height: 110 }
-            });
-          }
-        } catch (e) {
-          // Si la imagen no se puede añadir, no pasa nada
-        }
+      // Obtener imagen desde la API de fotos oficial
+      const fotoBuffer = await obtenerFotoArticulo(art.codigo, usuario, password);
+      if (fotoBuffer) {
+        const imageId = workbook.addImage({
+          buffer: fotoBuffer,
+          extension: 'jpeg'
+        });
+        // Columna imagen (última): campos.length - 1
+        ws.addImage(imageId, {
+          tl: { col: campos.length - 1, row: i + 1 },
+          ext: { width: 110, height: 110 }
+        });
       }
     }
 
