@@ -9,9 +9,9 @@
     "axios": "^1.6.7",
     "exceljs": "^4.3.0",
     "xlsx": "^0.18.5",
-    "jimp": "^0.22.10",        // <-- Añade esta línea
-    "uuid": "^9.0.0",          // <-- Añade esta línea
-    "p-limit": "^4.0.0"        // <-- Añade esta línea
+    "jimp": "^0.22.10",
+    "uuid": "^9.0.0",
+    "p-limit": "^4.0.0"
   },
   "scripts": {
     "start": "node server.js"
