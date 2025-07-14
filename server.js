@@ -67,7 +67,7 @@ app.get('/grupos.xlsx', async (req, res) => {
     res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(response.data);
   } catch (err) {
-    res.status(500).send("No se pudo descargar el archivo de grupos.");
+    res.status(500).json({ error: "No se pudo descargar el archivo de grupos." });
   }
 });
 
@@ -98,13 +98,26 @@ async function obtenerFotoArticulo(codigo, usuario, password) {
 const jobs = {}; // jobId: { progress, buffer, error, filename }
 
 app.post('/api/genera-excel-final-async', async (req, res) => {
-  const jobId = uuidv4();
-  jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null };
+  try {
+    // Validación básica de parámetros
+    const { grupo } = req.body;
+    if (!grupo || typeof grupo !== 'string' || grupo.trim() === '') {
+      return res.status(400).json({ error: "El parámetro 'grupo' es obligatorio." });
+    }
 
-  // Inicia la generación en segundo plano (no esperes, responde ya)
-  generarExcelAsync(req.body, jobId);
+    const jobId = uuidv4();
+    jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null };
 
-  res.json({ jobId });
+    console.log(`[${new Date().toISOString()}] Nueva petición de Excel para grupo "${grupo}", jobId: ${jobId}`);
+
+    // Inicia la generación en segundo plano (async)
+    generarExcelAsync(req.body, jobId);
+
+    res.json({ jobId });
+  } catch (err) {
+    // Esto solo si hay un error inesperado al iniciar el job (raro)
+    res.status(500).json({ error: "Error iniciando la generación del Excel." });
+  }
 });
 
 // Endpoint para consultar progreso
@@ -123,7 +136,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
   if (!job || !job.buffer) {
-    return res.status(404).send('Archivo no disponible.');
+    return res.status(404).json({ error: 'Archivo no disponible.' });
   }
   res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -136,13 +149,28 @@ async function generarExcelAsync(params, jobId) {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400 } = params;
 
     // 1. Leer grupos.xlsx desde GitHub
-    const responseGrupos = await axios.get(
-      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
-      { responseType: 'arraybuffer' }
-    );
-    const workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
-    const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
-    const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+    let responseGrupos;
+    try {
+      responseGrupos = await axios.get(
+        'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
+        { responseType: 'arraybuffer' }
+      );
+    } catch (err) {
+      jobs[jobId].error = "No se pudo descargar el archivo de grupos.";
+      jobs[jobId].progress = 100;
+      return;
+    }
+
+    let workbookGrupos, sheetGrupos, grupos;
+    try {
+      workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
+      sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
+      grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+    } catch (err) {
+      jobs[jobId].error = "No se pudo leer el archivo de grupos.";
+      jobs[jobId].progress = 100;
+      return;
+    }
 
     // 2. Saca los códigos del grupo seleccionado
     const codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
@@ -156,13 +184,19 @@ async function generarExcelAsync(params, jobId) {
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
-    const respArticulos = await axios.get(apiURL, {
-      auth: { username: usuario, password: password },
-      timeout: 60_000,
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-    });
-
-    let articulos = respArticulos.data;
+    let respArticulos, articulos;
+    try {
+      respArticulos = await axios.get(apiURL, {
+        auth: { username: usuario, password: password },
+        timeout: 60_000,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      });
+      articulos = respArticulos.data;
+    } catch (err) {
+      jobs[jobId].error = "No se pudo conectar con la API de Atosa.";
+      jobs[jobId].progress = 100;
+      return;
+    }
 
     // 4. Filtra por grupo y stock (si procede)
     articulos = articulos.filter(art =>
@@ -182,31 +216,37 @@ async function generarExcelAsync(params, jobId) {
     // 6. Calcula artículos sin descuento (como en tu script)
     let articulos_sin_descuento = new Set();
     if (descuento > 0) {
-      const usuariosDescuento = [
-        { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" },
-        { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" }
-      ];
-      const [resp4, resp8] = await Promise.all(usuariosDescuento.map(u =>
-        axios.get(apiURL, {
-          auth: { username: u.usuario, password: u.password },
-          timeout: 60_000,
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-        })
-      ));
-      const precios4 = Object.fromEntries(resp4.data.map(a => [a.codigo, parseFloat(a.precioVenta)]));
-      const precios8 = Object.fromEntries(resp8.data.map(a => [a.codigo, parseFloat(a.precioVenta)]));
-      articulos.forEach(art => {
-        const cod = art.codigo;
-        const pv0 = parseFloat(art.precioVenta);
-        const pv4 = precios4[cod];
-        const pv8 = precios8[cod];
-        if (
-          pv4 !== undefined && pv8 !== undefined &&
-          Math.abs(pv0 - pv4) < 0.01 && Math.abs(pv0 - pv8) < 0.01
-        ) {
-          articulos_sin_descuento.add(cod);
-        }
-      });
+      try {
+        const usuariosDescuento = [
+          { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" },
+          { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" }
+        ];
+        const [resp4, resp8] = await Promise.all(usuariosDescuento.map(u =>
+          axios.get(apiURL, {
+            auth: { username: u.usuario, password: u.password },
+            timeout: 60_000,
+            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+          })
+        ));
+        const precios4 = Object.fromEntries(resp4.data.map(a => [a.codigo, parseFloat(a.precioVenta)]));
+        const precios8 = Object.fromEntries(resp8.data.map(a => [a.codigo, parseFloat(a.precioVenta)]));
+        articulos.forEach(art => {
+          const cod = art.codigo;
+          const pv0 = parseFloat(art.precioVenta);
+          const pv4 = precios4[cod];
+          const pv8 = precios8[cod];
+          if (
+            pv4 !== undefined && pv8 !== undefined &&
+            Math.abs(pv0 - pv4) < 0.01 && Math.abs(pv0 - pv8) < 0.01
+          ) {
+            articulos_sin_descuento.add(cod);
+          }
+        });
+      } catch (err) {
+        jobs[jobId].error = "No se pudo calcular los descuentos.";
+        jobs[jobId].progress = 100;
+        return;
+      }
     }
 
     // 7. Crear Excel
@@ -272,13 +312,21 @@ async function generarExcelAsync(params, jobId) {
     });
 
     // 10. Devuelve el archivo Excel (guarda en memoria)
-    const buffer = await workbook.xlsx.writeBuffer();
+    let buffer;
+    try {
+      buffer = await workbook.xlsx.writeBuffer();
+    } catch (err) {
+      jobs[jobId].error = "No se pudo generar el archivo Excel.";
+      jobs[jobId].progress = 100;
+      return;
+    }
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}.xlsx`;
+    console.log(`[${new Date().toISOString()}] Terminado jobId ${jobId} (${articulos.length} artículos)`);
   } catch (err) {
     console.error(err);
-    jobs[jobId].error = "Error generando el Excel.";
+    jobs[jobId].error = "Error generando el Excel (excepción interna).";
     jobs[jobId].progress = 100;
   }
 }
