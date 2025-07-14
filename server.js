@@ -53,7 +53,7 @@ const diccionario_traduccion = {
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
   Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
+  Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
@@ -90,7 +90,10 @@ app.get('/api/grupos', async (req, res) => {
 });
 
 // Obtener la primera foto de un artículo en Buffer (jpeg)
-async function obtenerFotoArticulo(codigo, usuario, password) {
+async function obtenerFotoArticulo(codigo) {
+  // SIEMPRE usa el usuario español, para evitar problemas de permisos
+  const usuario = usuarios_api["Español"].usuario;
+  const password = usuarios_api["Español"].password;
   try {
     const fotoResp = await axios.get(
       `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
@@ -300,23 +303,30 @@ async function generarExcelAsync(params, jobId) {
       }
       ws.addRow(fila);
 
-      // Obtener imagen desde la API de fotos oficial
-      const fotoBuffer = await obtenerFotoArticulo(art.codigo, usuario, password);
-if (fotoBuffer) {
-  // REDIMENSIONAR Y COMPRIMIR como en Python
-  const img = await Jimp.read(fotoBuffer);
-  img.resize(110, 110).quality(60); // Igual que tu script Python
-  const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
+      // Obtener imagen usando SIEMPRE usuario español
+      const fotoBuffer = await obtenerFotoArticulo(art.codigo);
+      if (fotoBuffer) {
+        try {
+          // Redimensionar y comprimir a 110x110 JPEG calidad 60
+          const img = await Jimp.read(fotoBuffer);
+          img.resize(110, 110).quality(60);
+          const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
 
-  const imageId = workbook.addImage({
-    buffer: miniBuffer,
-    extension: 'jpeg'
-  });
-  ws.addImage(imageId, {
-    tl: { col: campos.length - 1, row: i + 1 },
-    ext: { width: 110, height: 110 }
-  });
-}
+          // DEBUG: log tamaño antes y después
+          // console.log(`Foto ${art.codigo}: original ${fotoBuffer.length} bytes, mini ${miniBuffer.length} bytes`);
+
+          const imageId = workbook.addImage({
+            buffer: miniBuffer,
+            extension: 'jpeg'
+          });
+          ws.addImage(imageId, {
+            tl: { col: campos.length - 1, row: i + 1 },
+            ext: { width: 110, height: 110 }
+          });
+        } catch (e) {
+          console.log(`Error procesando imagen ${art.codigo}:`, e.message);
+        }
+      }
       jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
     }
 
