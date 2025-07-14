@@ -82,10 +82,9 @@ async function descargarImagen(url) {
   }
 }
 
-// Endpoint principal para generar el Excel final
-app.post('/api/genera-excel-final', async (req, res) => {
+// --- BLOQUE PRINCIPAL: GESTOR DE EXCEL ---
+async function generaExcel(req, res) {
   try {
-    // Recibe: grupo, idioma, descuento, soloStock, maxFilas
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400 } = req.body;
 
     // 1. Leer grupos.xlsx desde GitHub
@@ -236,7 +235,13 @@ app.post('/api/genera-excel-final', async (req, res) => {
     console.error(err);
     res.status(500).json({ error: "Error generando el Excel." });
   }
-});
+}
+
+// Endpoint principal
+app.post('/api/genera-excel-final', generaExcel);
+
+// Alias para compatibilidad frontend antiguo
+app.post('/api/genera-excel', generaExcel);
 
 // Endpoint de prueba para saber si el backend está OK
 app.get('/', (req, res) => {
