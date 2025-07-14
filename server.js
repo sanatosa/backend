@@ -55,6 +55,21 @@ const usuarios_api = {
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
+// Endpoint para descargar grupos.xlsx del repositorio GitHub (proxy)
+app.get('/grupos.xlsx', async (req, res) => {
+  try {
+    const response = await axios.get(
+      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
+      { responseType: 'arraybuffer' }
+    );
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(response.data);
+  } catch (err) {
+    res.status(500).send("No se pudo descargar el archivo de grupos.");
+  }
+});
+
 // Descarga imagen desde URL y la devuelve como Buffer
 async function descargarImagen(url) {
   if (!url) return null;
