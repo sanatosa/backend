@@ -71,6 +71,23 @@ app.get('/grupos.xlsx', async (req, res) => {
   }
 });
 
+// Endpoint para obtener la lista de grupos únicos (para el desplegable)
+app.get('/api/grupos', async (req, res) => {
+  try {
+    const response = await axios.get(
+      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
+      { responseType: 'arraybuffer' }
+    );
+    const workbookGrupos = XLSX.read(response.data, { type: 'buffer' });
+    const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
+    const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+    const nombres = [...new Set(grupos.map(row => row.grupo).filter(Boolean))].sort();
+    res.json({ grupos: nombres });
+  } catch (err) {
+    res.status(500).json({ error: "No se pudieron obtener los grupos." });
+  }
+});
+
 // Obtener la primera foto de un artículo en Buffer (jpeg)
 async function obtenerFotoArticulo(codigo, usuario, password) {
   try {
@@ -84,7 +101,6 @@ async function obtenerFotoArticulo(codigo, usuario, password) {
     );
     const fotos = fotoResp.data.fotos;
     if (Array.isArray(fotos) && fotos.length > 0) {
-      // Devuelve buffer de la primera foto (JPG)
       return Buffer.from(fotos[0], 'base64');
     }
     return null;
@@ -99,7 +115,6 @@ const jobs = {}; // jobId: { progress, buffer, error, filename }
 
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
-    // Validación básica de parámetros
     const { grupo } = req.body;
     if (!grupo || typeof grupo !== 'string' || grupo.trim() === '') {
       return res.status(400).json({ error: "El parámetro 'grupo' es obligatorio." });
@@ -110,12 +125,10 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
 
     console.log(`[${new Date().toISOString()}] Nueva petición de Excel para grupo "${grupo}", jobId: ${jobId}`);
 
-    // Inicia la generación en segundo plano (async)
     generarExcelAsync(req.body, jobId);
 
     res.json({ jobId });
   } catch (err) {
-    // Esto solo si hay un error inesperado al iniciar el job (raro)
     res.status(500).json({ error: "Error iniciando la generación del Excel." });
   }
 });
@@ -293,13 +306,11 @@ async function generarExcelAsync(params, jobId) {
           buffer: fotoBuffer,
           extension: 'jpeg'
         });
-        // Columna imagen (última): campos.length - 1
         ws.addImage(imageId, {
           tl: { col: campos.length - 1, row: i + 1 },
           ext: { width: 110, height: 110 }
         });
       }
-      // Actualiza progreso (80% del total)
       jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
     }
 
