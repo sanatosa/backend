@@ -1,5 +1,4 @@
-// server.js — Backend ATOSA
-// Lógica óptima: precios, stock y promociones siempre en español; descripción en el idioma elegido
+// server.js — Backend ATOSA con lógica correcta: idiomas solo afecta descripción; descuentos y promociones SIEMPRE igual que Python (usuarios españoles)
 
 const express = require('express');
 const axios = require('axios');
@@ -105,7 +104,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // --- SIEMPRE base en español para todas las lógicas de precio, stock, etc. ---
+    // Base de datos SIEMPRE en español
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
@@ -134,11 +133,10 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // --- OBTENER DESCRIPCIÓN EN IDIOMA (si es diferente al español) ---
-    let descripcionesExtra = {};
+    // Descripciones en idioma
+    let descripcionesIdioma = {};
     if (idioma !== "Español") {
       try {
-        // Coge solo descripciones y códigos
         const userIdioma = usuarios_api[idioma];
         const respIdioma = await axios.get(apiURL, {
           auth: { username: userIdioma.usuario, password: userIdioma.password },
@@ -147,16 +145,15 @@ async function generarExcelAsync(params, jobId) {
         });
         for (const art of respIdioma.data) {
           if (art.codigo && art.descripcion) {
-            descripcionesExtra[art.codigo.toString().trim()] = art.descripcion;
+            descripcionesIdioma[art.codigo.toString().trim()] = art.descripcion;
           }
         }
       } catch (e) {
-        // Si falla, usa la descripción española
-        descripcionesExtra = {};
+        descripcionesIdioma = {};
       }
     }
 
-    // -------- LÓGICA DETECCIÓN PROMOCIONALES, SIEMPRE EN ESPAÑOL --------
+    // -------- Lógica PROMOCIONES solo códigos del grupo seleccionado --------
     let articulos_promocion = new Set();
     if (descuento > 0) {
       let precios4 = {}, precios8 = {};
@@ -173,35 +170,35 @@ async function generarExcelAsync(params, jobId) {
             httpsAgent: new https.Agent({ rejectUnauthorized: false }),
           }),
         ]);
-        // Mapas código-precio (string limpio)
-        resp4.data.forEach(a => {
-          if (a.codigo && a.precioVenta !== undefined) precios4[a.codigo.toString().trim()] = parseFloat(a.precioVenta);
-        });
-        resp8.data.forEach(a => {
-          if (a.codigo && a.precioVenta !== undefined) precios8[a.codigo.toString().trim()] = parseFloat(a.precioVenta);
-        });
-        // Promocionales = los que tienen el mismo precio para usuario 4% y usuario 8%
-        for (const codigo of Object.keys(precios4)) {
+        for (const art of resp4.data) {
+          const cod = art.codigo ? art.codigo.toString().trim() : null;
+          if (codigosGrupo.includes(cod)) precios4[cod] = parseFloat(art.precioVenta);
+        }
+        for (const art of resp8.data) {
+          const cod = art.codigo ? art.codigo.toString().trim() : null;
+          if (codigosGrupo.includes(cod)) precios8[cod] = parseFloat(art.precioVenta);
+        }
+        for (const cod of codigosGrupo) {
           if (
-            precios8[codigo] !== undefined &&
-            Math.abs(precios4[codigo] - precios8[codigo]) < 0.01
+            precios4[cod] !== undefined &&
+            precios8[cod] !== undefined &&
+            Math.abs(precios4[cod] - precios8[cod]) < 0.01
           ) {
-            articulos_promocion.add(codigo);
+            articulos_promocion.add(cod);
           }
         }
-      } catch (err) {
+      } catch {
         articulos_promocion = new Set();
       }
     }
 
-    // ----------- FORMATO EXCEL IGUAL AL SCRIPT -----------
+    // --------- FORMATO EXCEL SCRIPT PYTHON ---------
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Anchos de columna y alineaciones
     const colWidths = { codigo: 12, descripcion: 40, disponible: 12, ean13: 12, precioVenta: 12, umv: 10, imagen: 18 };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
@@ -220,10 +217,9 @@ async function generarExcelAsync(params, jobId) {
     });
 
     let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
-    let pasos = 0;
+    let pasos = 0;;
     let failedFotos = [];
 
-    // Añade filas de datos
     articulos_base.forEach((art, i) => {
       const fila = [];
       campos.forEach(campo => {
@@ -231,7 +227,6 @@ async function generarExcelAsync(params, jobId) {
         if (campo === "precioVenta") {
           try {
             const cod = art.codigo?.toString().trim();
-            // SOLO aplica descuento si el artículo NO es promocional
             if (descuento > 0 && !articulos_promocion.has(cod)) {
               valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
             } else {
@@ -239,10 +234,9 @@ async function generarExcelAsync(params, jobId) {
             }
           } catch {}
         } else if (campo === "descripcion" && idioma !== "Español") {
-          // usa la descripción traducida si existe
           const cod = art.codigo?.toString().trim();
-          if (descripcionesExtra[cod]) {
-            valor = descripcionesExtra[cod];
+          if (descripcionesIdioma[cod]) {
+            valor = descripcionesIdioma[cod];
           }
         }
         fila.push(valor);
@@ -252,7 +246,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
-    // Formateo de filas de datos, idéntico a cabecera
+    // Formateo de filas datos igual a cabecera, con EAN13 en vertical
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = 90;
@@ -269,7 +263,7 @@ async function generarExcelAsync(params, jobId) {
       });
     }
 
-    // Inserta imágenes API si corresponde
+    // Inserción de imágenes vía API español (opcional)
     if (!sinImagenes) {
       const limit = pLimit(3);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
@@ -309,7 +303,6 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
-// Función de obtención de fotos
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
   for (let i = 0; i < intentos; i++) {
     try {
