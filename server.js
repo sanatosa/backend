@@ -9,7 +9,8 @@ const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
 
 const app = express();
-app.use(cors({ origin: 'https://webb2b.netlify.app' }));
+
+app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Cambia por tu frontend si es diferente
 app.use(express.json());
 
 const diccionario_traduccion = {
@@ -20,14 +21,16 @@ const diccionario_traduccion = {
 };
 
 const usuarios_api = {
-  Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
-  Inglés:    { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés:   { usuario: "frances@atosa.es", password: "AtosaFrancés" },
-  Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
+  Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
+  Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
+  Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
+  Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
+// ---- GESTIÓN DE JOBS (progreso y buffer en memoria) ----
 const jobs = {};
 
+// Endpoint: lista de grupos según tu archivo local
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -40,6 +43,7 @@ app.get('/api/grupos', async (req, res) => {
   }
 });
 
+// Inicia la generación
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = req.body;
@@ -52,6 +56,7 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
   }
 });
 
+// Progreso polling
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -66,6 +71,7 @@ app.get('/api/progreso/:jobId', (req, res) => {
   res.json({ progress: job.progress, error: job.error, filename: job.filename, eta });
 });
 
+// Descarga del archivo generado
 app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -75,6 +81,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
+// --- Lógica generarExcelAsync ---
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -82,8 +89,11 @@ async function generarExcelAsync(params, jobId) {
     let workbookGrupos = XLSX.readFile('./grupos.xlsx');
     let sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
     let grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+
     let codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
-    if (!codigosGrupo.length) { jobs[jobId].error = "No hay artículos para ese grupo."; jobs[jobId].progress = 100; return; }
+    if (!codigosGrupo.length) {
+      jobs[jobId].error = "No hay artículos para ese grupo."; jobs[jobId].progress = 100; return;
+    }
 
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
@@ -93,12 +103,17 @@ async function generarExcelAsync(params, jobId) {
       timeout: 60000,
       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
     });
+
     let articulos = respArticulos.data.filter(art =>
       codigosGrupo.includes(art.codigo?.toString()) &&
       (!soloStock || parseInt(art.disponible || 0) > 0)
     ).slice(0, maxFilas);
-    if (!articulos.length) { jobs[jobId].error = "No hay artículos que coincidan con el filtro."; jobs[jobId].progress = 100; return; }
 
+    if (!articulos.length) {
+      jobs[jobId].error = "No hay artículos que coincidan con el filtro."; jobs[jobId].progress = 100; return;
+    }
+
+    // Aplica lógicas de descuento como en versiones anteriores
     let articulos_sin_descuento = new Set();
     if (descuento > 0) {
       try {
@@ -130,61 +145,49 @@ async function generarExcelAsync(params, jobId) {
       } catch {}
     }
 
+    // --- Construcción Excel ---
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Dimensiones y estilos
+    // FORMATO: columnas, cabecera bold, centrado, etc.
     const colWidths = [12, 40, 12, 12, 12, 10, 18];
     ws.columns = ws.columns.map((col, idx) => ({ ...col, width: colWidths[idx] || 15 }));
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
-    if (sinImagenes) {
-      articulos.forEach((art, i) => {
-        let fila = [];
-        for (let c of campos) {
-          let valor = art[c] ?? "";
-          if (c === "precioVenta") {
-            try {
-              if (descuento > 0 && !articulos_sin_descuento.has(art.codigo)) {
-                valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
-              } else {
-                valor = parseFloat(valor);
-              }
-            } catch {}
-          }
-          fila.push(valor);
-        }
-        ws.addRow(fila);
-        jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 90);
-      });
-    } else {
-      const limit = pLimit(8); // paralelismo de descargas de imágenes
-      let filaIdx = 2;
-      for (let [i, art] of articulos.entries()) {
-        let fila = [];
-        for (let c of campos) {
-          let valor = art[c] ?? "";
-          if (c === "precioVenta") {
-            try {
-              if (descuento > 0 && !articulos_sin_descuento.has(art.codigo)) {
-                valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
-              } else {
-                valor = parseFloat(valor);
-              }
-            } catch {}
-          }
-          fila.push(valor);
-        }
-        ws.addRow(fila);
-        jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
-      }
+    // Barra de progreso y procesamiento
+    let pasoTotal = sinImagenes ? articulos.length : articulos.length * 2; // una vuelta para filas y otra (más lenta) para imágenes
+    let pasos = 0;
+    let failedFotos = [];
 
+    for (let [i, art] of articulos.entries()) {
+      let fila = [];
+      for (let c of campos) {
+        let valor = art[c] ?? "";
+        if (c === "precioVenta") {
+          try {
+            if (descuento > 0 && !articulos_sin_descuento.has(art.codigo)) {
+              valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
+            } else {
+              valor = parseFloat(valor);
+            }
+          } catch {}
+        }
+        fila.push(valor);
+      }
+      ws.addRow(fila);
+      pasos++;
+      jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
+    }
+
+    // Inserta imágenes solo si se ha seleccionado
+    if (!sinImagenes) {
+      const limit = pLimit(4); // baja a 4 si la API da problemas
       await Promise.all(articulos.map((art, i) => limit(async () => {
-        let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, idioma);
+        let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password);
         if (fotoBuffer) {
           try {
             let img = await Jimp.read(fotoBuffer);
@@ -196,12 +199,21 @@ async function generarExcelAsync(params, jobId) {
               tl: { col: campos.length - 1, row: i + 1 },
               ext: { width: 110, height: 110 }
             });
-          } catch (e) {}
+          } catch (e) {
+            failedFotos.push(art.codigo);
+          }
+        } else {
+          failedFotos.push(art.codigo);
         }
-        jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
+        pasos++;
+        // La barra nunca baja: calcula sólo incremental
+        if (jobs[jobId].progress < 99) {
+          jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
+        }
       })));
     }
 
+    // Ajusta formato final
     ws.eachRow({ includeEmpty: false }, function(row, rowNumber) {
       row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
       row.height = 90;
@@ -213,6 +225,8 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
+
+    // → Puedes notificar en logs o mensajes los códigos sin foto (failedFotos) si deseas
   } catch (err) {
     jobs[jobId].error = "Error generando el Excel (excepción interna).";
     jobs[jobId].progress = 100;
@@ -220,8 +234,8 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
-async function obtenerFotoArticuloAPI(codigo, idioma) {
-  const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
+// --- DESCARGA DE FOTOS API ---
+async function obtenerFotoArticuloAPI(codigo, usuario, password) {
   try {
     const fotoResp = await axios.get(
       `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
@@ -236,7 +250,7 @@ async function obtenerFotoArticuloAPI(codigo, idioma) {
       return Buffer.from(fotos[0], 'base64');
     }
     return null;
-  } catch {
+  } catch (e) {
     return null;
   }
 }
