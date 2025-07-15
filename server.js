@@ -1,5 +1,4 @@
-// server.js — Lógica de descuentos: SOLO se consideran iguales los precios del usuario base y usuario 8%
-// Si el precio es el mismo en ambos, el artículo no admite descuento (es promocional/fijo).
+// server.js — Descuentos correctos (solo compara base vs 8%), formato Excel mejorado para EAN y celda imagen perfecta
 
 const express = require('express');
 const axios = require('axios');
@@ -29,8 +28,6 @@ const usuarios_api = {
 };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
-
-// ENDPOINTS
 
 app.get('/api/grupos', async (req, res) => {
   try {
@@ -81,7 +78,6 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// LÓGICA PRINCIPAL: SOLO compara usuario base con usuario del 8%
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -100,7 +96,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Datos base en español (para todo menos descripción)
+    // Datos base en español (todos campos menos descripción)
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
@@ -129,7 +125,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Descripciones extra para traducción
+    // Descripciones en idioma diferente (si aplica)
     let descripcionesIdioma = {};
     if (idioma !== "Español") {
       try {
@@ -149,7 +145,7 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // --- Lógica robusta SOLO usuario base y usuario 8% para promociones ---
+    // SOLO compara precios entre usuario base y usuario 8% para detectar promociones
     let articulos_promocion = new Set();
     if (descuento > 0) {
       let precios0 = {}, precios8 = {};
@@ -167,7 +163,6 @@ async function generarExcelAsync(params, jobId) {
           const cod = art.codigo ? art.codigo.toString().trim() : null;
           if (cod) precios8[cod] = parseFloat(art.precioVenta);
         }
-        // SOLO se consideran promocionales si el precio es IGUAL en usuario base y 8%
         for (const cod of Object.keys(precios0)) {
           if (
             precios8[cod] !== undefined &&
@@ -181,19 +176,20 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // --- FORMATO EXCEL PRO ---
+    // Formato Excel profesional con mejoras para EAN e imagen
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    const colWidths = { codigo: 12, descripcion: 40, disponible: 12, ean13: 12, precioVenta: 12, umv: 10, imagen: 18 };
+    // Ajusta la altura de fila para que el EAN quepa entero y el ancho/alto de la imagen coincida con la celda
+    const colWidths = { codigo: 12, descripcion: 40, disponible: 12, ean13: 12, precioVenta: 12, umv: 10, imagen: 17.5 }; // imagen ≈ 17.5 char ≈ 110 px
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
-    headerRow.height = 90;
+    headerRow.height = 125; // mayor altura para cabecera
     headerRow.eachCell(cell => {
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: campos[cell.col - 1] === "ean13" ? 90 : 0 };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1976D2' }};
@@ -226,9 +222,10 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
+    // Mejora visual fila a fila (filas datos): altura y zebra, EAN vertical
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
-      row.height = 90;
+      row.height = 125; // más espacio para EAN e imagen
       row.font = { size: 13, name: 'Segoe UI' };
       const zebraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebraColors[(i%2)] } };
       let cod = row.getCell(1).value?.toString().trim();
@@ -266,6 +263,7 @@ async function generarExcelAsync(params, jobId) {
         let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password, 2);
         if (fotoBuffer) {
           try {
+            // La imagen irá de 110x110 píxeles, igual que la celda
             let img = await Jimp.read(fotoBuffer);
             img.cover(110, 110);
             img.quality(60);
