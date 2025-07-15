@@ -1,4 +1,5 @@
-// server.js — Excel profesional para tablet, descuentos robustos, promociones y traducción solo en descripción
+// server.js — Lógica de descuentos: SOLO se consideran iguales los precios del usuario base y usuario 8%
+// Si el precio es el mismo en ambos, el artículo no admite descuento (es promocional/fijo).
 
 const express = require('express');
 const axios = require('axios');
@@ -26,11 +27,11 @@ const usuarios_api = {
   Francés:   { usuario: "frances@atosa.es", password: "AtosaFrances" },
   Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-const usuario4 = { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
 
-// --- ENDPOINTS ---
+// ENDPOINTS
+
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -80,7 +81,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// --- LÓGICA PRINCIPAL MEJORADA ---
+// LÓGICA PRINCIPAL: SOLO compara usuario base con usuario del 8%
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -99,7 +100,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Artículos, precios y promociones en español
+    // Datos base en español (para todo menos descripción)
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
@@ -111,7 +112,7 @@ async function generarExcelAsync(params, jobId) {
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
     } catch (err) {
-      jobs[jobId].error = "Error autenticando usuario principal de Atosa (Español): " + (err.response?.status || "") + " " + (err.response?.data || "");
+      jobs[jobId].error = "Error autenticando usuario principal: " + (err.response?.status || "") + " " + (err.response?.data || "");
       jobs[jobId].progress = 100;
       return;
     }
@@ -119,7 +120,7 @@ async function generarExcelAsync(params, jobId) {
     const articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
-        (!soloStock || parseInt(art.disponible || 0) > 0) )
+        (!soloStock || parseInt(art.disponible || 0) > 0))
       .slice(0, maxFilas);
 
     if (!articulos_base.length) {
@@ -128,7 +129,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Descripciones en idioma diferente (si aplica)
+    // Descripciones extra para traducción
     let descripcionesIdioma = {};
     if (idioma !== "Español") {
       try {
@@ -148,40 +149,29 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // --- Lógica robusta de promociones y descuentos ---
+    // --- Lógica robusta SOLO usuario base y usuario 8% para promociones ---
     let articulos_promocion = new Set();
     if (descuento > 0) {
-      let precios0 = {}, precios4 = {}, precios8 = {};
+      let precios0 = {}, precios8 = {};
       try {
-        for(const art of articulos_base) {
-          let cod = art.codigo ? art.codigo.toString().trim() : null;
+        for (const art of articulos_base) {
+          const cod = art.codigo ? art.codigo.toString().trim() : null;
           if (cod) precios0[cod] = parseFloat(art.precioVenta);
         }
-        const [resp4, resp8] = await Promise.all([
-          axios.get(apiURL, {
-            auth: { username: usuario4.usuario, password: usuario4.password },
-            timeout: 70000,
-            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-          }),
-          axios.get(apiURL, {
-            auth: { username: usuario8.usuario, password: usuario8.password },
-            timeout: 70000,
-            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-          }),
-        ]);
-        for (const art of resp4.data) {
-          let cod = art.codigo ? art.codigo.toString().trim() : null;
-          if (cod) precios4[cod] = parseFloat(art.precioVenta);
-        }
+        const resp8 = await axios.get(apiURL, {
+          auth: { username: usuario8.usuario, password: usuario8.password },
+          timeout: 70000,
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+        });
         for (const art of resp8.data) {
-          let cod = art.codigo ? art.codigo.toString().trim() : null;
+          const cod = art.codigo ? art.codigo.toString().trim() : null;
           if (cod) precios8[cod] = parseFloat(art.precioVenta);
         }
+        // SOLO se consideran promocionales si el precio es IGUAL en usuario base y 8%
         for (const cod of Object.keys(precios0)) {
           if (
-            precios4[cod] !== undefined &&
             precios8[cod] !== undefined &&
-            Math.abs(precios4[cod] - precios8[cod]) < 0.01
+            Math.abs(precios0[cod] - precios8[cod]) < 0.01
           ) {
             articulos_promocion.add(cod);
           }
@@ -236,7 +226,6 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
-    // Ajuste visual fila a fila: zebra, precios, stocks y promo
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = 90;
@@ -250,13 +239,11 @@ async function generarExcelAsync(params, jobId) {
         cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: (campos[j-1] === "ean13" ? 90 : 0)};
         cell.fill = zebraColor;
         cell.border = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}}};
-        // Colorea Precio de promociones
         if (campos[j-1] === "precioVenta" && esPromo) {
           cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb: 'FFBBDEFB'} };
           cell.font = {...cell.font, color: {argb: 'FF1565C0'}, italic: true };
           cell.value = cell.value != null ? `${cell.value} PROMO` : 'PROMO';
         }
-        // Stock bajo
         if (campos[j-1] === "disponible") {
           if (stock <= 10) {
             cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb:'FFFFCDD2'} };
@@ -266,7 +253,6 @@ async function generarExcelAsync(params, jobId) {
             cell.font = {...cell.font, color: {argb:'FFF9A825'}, bold:true };
           }
         }
-        // Precio normal
         if (campos[j-1] === "precioVenta" && !esPromo) {
           cell.font = {...cell.font, color: {argb:'FF1976D2'}, bold:true};
           cell.alignment = {...cell.alignment, horizontal: 'right'};
@@ -274,7 +260,6 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // Imágenes igual que siempre
     if (!sinImagenes) {
       const limit = pLimit(3);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
