@@ -1,4 +1,5 @@
-// server.js — Backend ATOSA con formato Excel idéntico al script Python y lógica exacta de descuentos/promociones
+// server.js — Lógica de descuento EXACTA para detectar artículos promocionales (comparando precios 4% y 8%)
+// y formato Excel idéntico al del script Python con columnas, fuentes y rotación correcta.
 
 const express = require('express');
 const axios = require('axios');
@@ -12,14 +13,14 @@ const pLimit = require('p-limit').default;
 
 const app = express();
 
-app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Ajusta si tu frontend cambia
+app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Cambia si tu frontend es otro
 app.use(express.json());
 
 const diccionario_traduccion = {
-  Español: { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
-  Inglés: { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
-  Francés: { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
-  Italiano: { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
+  Español:    { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
+  Inglés:     { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
+  Francés:    { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
+  Italiano:   { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
@@ -27,14 +28,14 @@ const usuarios_api = {
   Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-const usuariosDescuento = [
-  { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" },
-  { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" }
-];
+// Usuarios para descuento máximo 4% y 8%
+const usuario4 = { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" };
+const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 
 const jobs = {};
 
 // ENDPOINTS
+
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -82,7 +83,8 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// LÓGICA DE GENERACIÓN DE EXCEL: Formato igual que el script y descuentos sin errores
+// LÓGICA DE GENERACIÓN DE EXCEL IDENTICA A TU SCRIPT
+
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -92,7 +94,7 @@ async function generarExcelAsync(params, jobId) {
     const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
     const codigosGrupo = grupos
       .filter(row => row.grupo === grupo)
-      .map(row => (row.codigo ? row.codigo.toString() : null))
+      .map(row => (row.codigo ? row.codigo.toString().trim() : null))
       .filter(Boolean);
 
     if (!codigosGrupo.length) {
@@ -101,18 +103,19 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
+    // 1. Descarga artículos para usuario de idioma (precio base)
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
-    const respArticulos = await axios.get(apiURL, {
+    const resp0 = await axios.get(apiURL, {
       auth: { username: usuario, password: password },
       timeout: 70000,
       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
     });
 
-    const articulos = respArticulos.data
+    const articulos = resp0.data
       .filter(art =>
-        codigosGrupo.includes(art.codigo?.toString()) &&
+        codigosGrupo.includes(art.codigo?.toString().trim()) &&
         (!soloStock || parseInt(art.disponible || 0) > 0)
       )
       .slice(0, maxFilas);
@@ -123,53 +126,58 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Lógica exacta de descuentos/promociones según script Python
-    let articulos_sin_descuento = new Set();
+    // 2. Descarga con usuario 4% y 8% SOLO si hay descuento
+    let articulos_promocion = new Set();
     if (descuento > 0) {
       try {
-        const [resp4, resp8] = await Promise.all(usuariosDescuento.map(u =>
+        const [resp4, resp8] = await Promise.all([
           axios.get(apiURL, {
-            auth: { username: u.usuario, password: u.password },
+            auth: { username: usuario4.usuario, password: usuario4.password },
             timeout: 70000,
             httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-          })
+          }),
+          axios.get(apiURL, {
+            auth: { username: usuario8.usuario, password: usuario8.password },
+            timeout: 70000,
+            httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+          }),
+        ]);
+        // Mapas código:precio como string de código SIEMPRE
+        const precios4 = Object.fromEntries(resp4.data.map(a =>
+          [a.codigo?.toString().trim(), parseFloat(a.precioVenta)]
         ));
-
-        const precios0 = Object.fromEntries(articulos.map(a => [a.codigo.toString(), parseFloat(a.precioVenta)]));
-        const precios4 = Object.fromEntries(resp4.data.map(a => [a.codigo.toString(), parseFloat(a.precioVenta)]));
-        const precios8 = Object.fromEntries(resp8.data.map(a => [a.codigo.toString(), parseFloat(a.precioVenta)]));
-
-        for (const codigo of Object.keys(precios0)) {
+        const precios8 = Object.fromEntries(resp8.data.map(a =>
+          [a.codigo?.toString().trim(), parseFloat(a.precioVenta)]
+        ));
+        // ARTÍCULOS PROMOCIONALES = los que tienen el mismo precio para usuario 4% y usuario 8%
+        for (const codigo of Object.keys(precios4)) {
           if (
-            precios4[codigo] !== undefined &&
             precios8[codigo] !== undefined &&
-            Math.abs(precios0[codigo] - precios4[codigo]) < 0.01 &&
-            Math.abs(precios0[codigo] - precios8[codigo]) < 0.01
+            Math.abs(precios4[codigo] - precios8[codigo]) < 0.01
           ) {
-            articulos_sin_descuento.add(codigo);
+            articulos_promocion.add(codigo);
           }
         }
       } catch (err) {
-        articulos_sin_descuento = new Set();
+        articulos_promocion = new Set();
       }
     }
 
-    // Formato idéntico a openpyxl / script Python
+    // FORMATO IDENTICO AL SCRIPT PYTHON
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // ANCHOS de columna idénticos
+    // Ajuste de anchos y alineaciones de columnas
     const colWidths = { codigo: 12, descripcion: 40, disponible: 12, ean13: 12, precioVenta: 12, umv: 10, imagen: 18 };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
-    // Cabecera: fuente, altura, alineación, wrapText y rotación en EAN13
+    // Cabecera: negrita, altura, alineación y rotación EAN13
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true, size: 14 };
     headerRow.height = 90;
-
     campos.forEach((campo, idx) => {
       const cell = headerRow.getCell(idx + 1);
       if (campo === "descripcion") {
@@ -185,17 +193,16 @@ async function generarExcelAsync(params, jobId) {
     let pasos = 0;
     let failedFotos = [];
 
-    // Agrega filas
+    // Filas de datos
     articulos.forEach((art, i) => {
       const fila = [];
       campos.forEach(campo => {
         let valor = art[campo] ?? "";
         if (campo === "precioVenta") {
           try {
-            if (
-              descuento > 0 &&
-              !articulos_sin_descuento.has(art.codigo?.toString())
-            ) {
+            const cod = art.codigo?.toString().trim();
+            // SOLO APLICA DESCUENTO si el artículo NO es promocional
+            if (descuento > 0 && !articulos_promocion.has(cod)) {
               valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
             } else {
               valor = parseFloat(valor);
@@ -209,7 +216,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
-    // Aplica formatos: altura, fuente y alineación a todas las filas, incluida la rotación EAN13
+    // Formatos de filas de datos, altura, alineación, especial EAN13
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = 90;
@@ -226,7 +233,7 @@ async function generarExcelAsync(params, jobId) {
       });
     }
 
-    // Inserta imágenes si corresponde (idéntica lógica a versiones previas)
+    // Inserta imágenes si corresponde
     if (!sinImagenes) {
       const limit = pLimit(3);
       await Promise.all(articulos.map((art, i) => limit(async () => {
