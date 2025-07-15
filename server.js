@@ -232,10 +232,10 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     });
 
-    // Ajusta altura de TODAS las filas a 127
+    // Ajusta altura de TODAS las filas a 95,25
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
-      row.height = 127;
+      row.height = 95,25;
       row.font = { size: 13, name: 'Segoe UI' };
       const zebraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebraColors[(i%2)] } };
       let cod = row.getCell(1).value?.toString().trim();
