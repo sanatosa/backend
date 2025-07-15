@@ -1,4 +1,4 @@
-// server.js — Backend ATOSA solo imágenes vía API
+// server.js — Backend ATOSA con formato de Excel idéntico al script Python (rotación EAN, estilos, etc.)
 
 const express = require('express');
 const axios = require('axios');
@@ -12,25 +12,28 @@ const pLimit = require('p-limit').default;
 
 const app = express();
 
-app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Cambia por la URL de tu frontend si procede
+app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
-// Diccionarios de traducción y usuarios de API
 const diccionario_traduccion = {
-  Español: { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
-  Inglés: { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
-  Francés: { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
-  Italiano: { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
+  Español:    { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
+  Inglés:     { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
+  Francés:    { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
+  Italiano:   { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
 const usuarios_api = {
-  Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
-  Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
-  Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
+  Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
+  Inglés:    { usuario: "ingles@atosa.es", password: "AtosaIngles" },
+  Francés:   { usuario: "frances@atosa.es", password: "AtosaFrancés" },
+  Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
+const usuariosDescuento = [
+  { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" },
+  { usuario: "santi@tradeinn.com",           password: "C8Zg1wqgfe" }
+];
+
 const jobs = {};
 
-// API — Grupos disponibles
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -43,7 +46,6 @@ app.get('/api/grupos', async (req, res) => {
   }
 });
 
-// API — Iniciar generación de Excel (asíncrono)
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = req.body;
@@ -56,7 +58,6 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
   }
 });
 
-// API — Consultar progreso de la tarea
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -71,7 +72,6 @@ app.get('/api/progreso/:jobId', (req, res) => {
   res.json({ progress: job.progress, error: job.error, filename: job.filename, eta });
 });
 
-// API — Descargar el Excel generado
 app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -81,7 +81,6 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// Función principal de generación asíncrona
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -97,12 +96,12 @@ async function generarExcelAsync(params, jobId) {
 
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
+
     let respArticulos = await axios.get(apiURL, {
       auth: { username: usuario, password: password },
-      timeout: 60000,
+      timeout: 70000,
       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
     });
-
     let articulos = respArticulos.data.filter(art =>
       codigosGrupo.includes(art.codigo?.toString()) &&
       (!soloStock || parseInt(art.disponible || 0) > 0)
@@ -112,36 +111,32 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro."; jobs[jobId].progress = 100; return;
     }
 
-    // Obtener artículos sin descuento en base a otras cuentas, si procede
+    // --- Replica lógica de descuento del script Python ---
     let articulos_sin_descuento = new Set();
     if (descuento > 0) {
       try {
-        const usuariosDescuento = [
-          { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" },
-          { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" }
-        ];
         const [resp4, resp8] = await Promise.all(usuariosDescuento.map(u =>
           axios.get(apiURL, {
             auth: { username: u.usuario, password: u.password },
-            timeout: 60000,
+            timeout: 70000,
             httpsAgent: new https.Agent({ rejectUnauthorized: false }),
           })
         ));
+        const precios0 = Object.fromEntries(articulos.map(a => [a.codigo, parseFloat(a.precioVenta)]));
         const precios4 = Object.fromEntries(resp4.data.map(a => [a.codigo, parseFloat(a.precioVenta)]));
         const precios8 = Object.fromEntries(resp8.data.map(a => [a.codigo, parseFloat(a.precioVenta)]));
-        articulos.forEach(art => {
-          const cod = art.codigo;
-          const pv0 = parseFloat(art.precioVenta);
-          const pv4 = precios4[cod];
-          const pv8 = precios8[cod];
+        for (let codigo of Object.keys(precios0)) {
+          const pv0 = precios0[codigo], pv4 = precios4[codigo], pv8 = precios8[codigo];
           if (
             pv4 !== undefined && pv8 !== undefined &&
             Math.abs(pv0 - pv4) < 0.01 && Math.abs(pv0 - pv8) < 0.01
           ) {
-            articulos_sin_descuento.add(cod);
+            articulos_sin_descuento.add(codigo);
           }
-        });
-      } catch {}
+        }
+      } catch (err) {
+        articulos_sin_descuento = new Set();
+      }
     }
 
     // Preparación del Excel
@@ -151,16 +146,29 @@ async function generarExcelAsync(params, jobId) {
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
+    // --- FORMATOS EXCEL: columna, filas, rotación, fuente, envoltura ---
     const colWidths = [12, 40, 12, 12, 12, 10, 18];
     ws.columns = ws.columns.map((col, idx) => ({ ...col, width: colWidths[idx] || 15 }));
-    ws.getRow(1).font = { bold: true };
-    ws.getRow(1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+
+    const headerRow = ws.getRow(1);
+    headerRow.font = { bold: true, size: 14 };
+    headerRow.height = 90;
+    headerRow.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+    for (let colIdx = 1; colIdx <= campos.length; colIdx++) {
+      const cell = headerRow.getCell(colIdx);
+      if (campos[colIdx - 1] === "descripcion") {
+        cell.alignment = { wrapText: true, vertical: "middle", horizontal: "center" };
+      } else if (campos[colIdx - 1] === "ean13") {
+        cell.alignment = { textRotation: 90, horizontal: "center", vertical: "center" };
+      } else {
+        cell.alignment = { horizontal: "center", vertical: "center" };
+      }
+    }
 
     let pasoTotal = sinImagenes ? articulos.length : articulos.length * 2;
     let pasos = 0;
     let failedFotos = [];
 
-    // Añadir las filas de datos
     for (let [i, art] of articulos.entries()) {
       let fila = [];
       for (let c of campos) {
@@ -181,7 +189,25 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     }
 
-    // Descargar e insertar imágenes si corresponde
+    // -- Aplica formato fila: fuente, altura, alineación, ajuste, rotación EAN13
+    for (let i = 2; i <= ws.rowCount; i++) {
+      let row = ws.getRow(i);
+      row.height = 90;
+      row.font = { size: 13 };
+      row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+      for (let colIdx = 1; colIdx <= campos.length; colIdx++) {
+        let cell = row.getCell(colIdx);
+        if (campos[colIdx - 1] === "descripcion") {
+          cell.alignment = { wrapText: true, vertical: "middle", horizontal: "center" };
+        } else if (campos[colIdx - 1] === "ean13") {
+          cell.alignment = { textRotation: 90, horizontal: "center", vertical: "center" };
+        } else {
+          cell.alignment = { horizontal: "center", vertical: "center" };
+        }
+      }
+    }
+
+    // -- Descarga e inserta imágenes si corresponde
     if (!sinImagenes) {
       const limit = pLimit(3);
       await Promise.all(articulos.map((art, i) => limit(async () => {
@@ -210,19 +236,10 @@ async function generarExcelAsync(params, jobId) {
       })));
     }
 
-    // Ajuste final de celdas
-    ws.eachRow({ includeEmpty: false }, function(row, rowNumber) {
-      row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
-      row.height = 90;
-      if (rowNumber === 1) row.font = { bold: true, size: 14 };
-      else row.font = { size: 13 };
-    });
-
     let buffer = await workbook.xlsx.writeBuffer();
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
-    // Puedes hacer logging opcional aquí de failedFotos
   } catch (err) {
     jobs[jobId].error = "Error generando el Excel (excepción interna).";
     jobs[jobId].progress = 100;
@@ -230,7 +247,6 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
-// Descarga de fotos vía API, con reintentos:
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
   for (let i = 0; i < intentos; i++) {
     try {
