@@ -54,7 +54,7 @@ const diccionario_traduccion = {
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
   Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
+  Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
@@ -115,7 +115,7 @@ async function obtenerFotoArticulo(codigo) {
 }
 
 // ---- GESTIÓN DE JOBS Y PROGRESO EN MEMORIA ----
-const jobs = {}; // jobId: { progress, buffer, error, filename }
+const jobs = {}; // jobId: { progress, buffer, error, filename, startedAt }
 
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
@@ -125,7 +125,7 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
     }
 
     const jobId = uuidv4();
-    jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null };
+    jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now() };
 
     console.log(`[${new Date().toISOString()}] Nueva petición de Excel para grupo "${grupo}", jobId: ${jobId}`);
 
@@ -137,14 +137,29 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
   }
 });
 
-// Endpoint para consultar progreso
+// Endpoint para consultar progreso (con ETA en segundos)
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
-  if (!jobs[jobId]) return res.status(404).json({ error: 'Trabajo no encontrado' });
+  const job = jobs[jobId];
+  if (!job) return res.status(404).json({ error: 'Trabajo no encontrado' });
+
+  let eta = null;
+  if (job.progress > 2 && job.progress < 99 && job.startedAt) {
+    // Tiempo transcurrido en segundos
+    const elapsed = (Date.now() - job.startedAt) / 1000;
+    // Progreso de 0 a 1
+    const p = Math.max(job.progress, 1) / 100;
+    // Tiempo estimado total
+    const total = elapsed / p;
+    // ETA en segundos
+    eta = Math.max(0, Math.round(total - elapsed));
+  }
+
   res.json({
-    progress: jobs[jobId].progress,
-    error: jobs[jobId].error,
-    filename: jobs[jobId].filename
+    progress: job.progress,
+    error: job.error,
+    filename: job.filename,
+    eta // segundos restantes (null si no se puede calcular)
   });
 });
 
@@ -163,7 +178,8 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
 // -------- GENERADOR EXCEL ASÍNCRONO -----------
 async function generarExcelAsync(params, jobId) {
   try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, maxFilas = 400, sinImagenes = false } = params;
+    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
+    const maxFilas = 3500; // límite fijo por defecto
 
     // 1. Leer grupos.xlsx desde GitHub
     let responseGrupos;
