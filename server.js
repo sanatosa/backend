@@ -1,4 +1,4 @@
-// server.js — Backend ATOSA con lógica correcta: idiomas solo afecta descripción; descuentos y promociones SIEMPRE igual que Python (usuarios españoles)
+// server.js — Excel profesional para tablet, descuentos robustos, promociones y traducción solo en descripción
 
 const express = require('express');
 const axios = require('axios');
@@ -28,20 +28,16 @@ const usuarios_api = {
 };
 const usuario4 = { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
-
 const jobs = {};
 
-// ENDPOINTS
-
+// --- ENDPOINTS ---
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheet);
     const nombres = [...new Set(
-      grupos
-        .map(row => (row.grupo ? row.grupo.toString().trim() : null))
-        .filter(gr => gr && gr.length > 0)
+      grupos.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0)
     )].sort();
     res.json({ grupos: nombres });
   } catch (err) {
@@ -84,8 +80,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// LÓGICA PRINCIPAL DE GENERACIÓN
-
+// --- LÓGICA PRINCIPAL MEJORADA ---
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -104,7 +99,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Base de datos SIEMPRE en español
+    // Artículos, precios y promociones en español
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
@@ -133,7 +128,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Descripciones en idioma
+    // Descripciones en idioma diferente (si aplica)
     let descripcionesIdioma = {};
     if (idioma !== "Español") {
       try {
@@ -153,11 +148,15 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // -------- Lógica PROMOCIONES solo códigos del grupo seleccionado --------
+    // --- Lógica robusta de promociones y descuentos ---
     let articulos_promocion = new Set();
     if (descuento > 0) {
-      let precios4 = {}, precios8 = {};
+      let precios0 = {}, precios4 = {}, precios8 = {};
       try {
+        for(const art of articulos_base) {
+          let cod = art.codigo ? art.codigo.toString().trim() : null;
+          if (cod) precios0[cod] = parseFloat(art.precioVenta);
+        }
         const [resp4, resp8] = await Promise.all([
           axios.get(apiURL, {
             auth: { username: usuario4.usuario, password: usuario4.password },
@@ -171,14 +170,14 @@ async function generarExcelAsync(params, jobId) {
           }),
         ]);
         for (const art of resp4.data) {
-          const cod = art.codigo ? art.codigo.toString().trim() : null;
-          if (codigosGrupo.includes(cod)) precios4[cod] = parseFloat(art.precioVenta);
+          let cod = art.codigo ? art.codigo.toString().trim() : null;
+          if (cod) precios4[cod] = parseFloat(art.precioVenta);
         }
         for (const art of resp8.data) {
-          const cod = art.codigo ? art.codigo.toString().trim() : null;
-          if (codigosGrupo.includes(cod)) precios8[cod] = parseFloat(art.precioVenta);
+          let cod = art.codigo ? art.codigo.toString().trim() : null;
+          if (cod) precios8[cod] = parseFloat(art.precioVenta);
         }
-        for (const cod of codigosGrupo) {
+        for (const cod of Object.keys(precios0)) {
           if (
             precios4[cod] !== undefined &&
             precios8[cod] !== undefined &&
@@ -192,7 +191,7 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // --------- FORMATO EXCEL SCRIPT PYTHON ---------
+    // --- FORMATO EXCEL PRO ---
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
@@ -203,41 +202,32 @@ async function generarExcelAsync(params, jobId) {
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
     const headerRow = ws.getRow(1);
-    headerRow.font = { bold: true, size: 14 };
+    headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
     headerRow.height = 90;
-    campos.forEach((campo, idx) => {
-      const cell = headerRow.getCell(idx + 1);
-      if (campo === "descripcion") {
-        cell.alignment = { wrapText: true, vertical: "middle", horizontal: "center" };
-      } else if (campo === "ean13") {
-        cell.alignment = { textRotation: 90, horizontal: "center", vertical: "center" };
-      } else {
-        cell.alignment = { horizontal: "center", vertical: "center" };
-      }
+    headerRow.eachCell(cell => {
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: campos[cell.col - 1] === "ean13" ? 90 : 0 };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1976D2' }};
+      cell.border = {bottom: {style: 'thick', color: {argb:'FF1E1E1E'}}};
     });
 
     let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
-    let pasos = 0;;
+    let pasos = 0;
     let failedFotos = [];
+    let zebraColors = ['FFFFFFFF','FFF3F4F6'];
 
     articulos_base.forEach((art, i) => {
       const fila = [];
+      const cod = art.codigo?.toString().trim();
       campos.forEach(campo => {
         let valor = art[campo] ?? "";
         if (campo === "precioVenta") {
-          try {
-            const cod = art.codigo?.toString().trim();
-            if (descuento > 0 && !articulos_promocion.has(cod)) {
-              valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
-            } else {
-              valor = parseFloat(valor);
-            }
-          } catch {}
-        } else if (campo === "descripcion" && idioma !== "Español") {
-          const cod = art.codigo?.toString().trim();
-          if (descripcionesIdioma[cod]) {
-            valor = descripcionesIdioma[cod];
+          if (descuento > 0 && !articulos_promocion.has(cod)) {
+            valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
+          } else {
+            valor = parseFloat(valor);
           }
+        } else if (campo === "descripcion" && idioma !== "Español") {
+          if (descripcionesIdioma[cod]) valor = descripcionesIdioma[cod];
         }
         fila.push(valor);
       });
@@ -246,24 +236,45 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
-    // Formateo de filas datos igual a cabecera, con EAN13 en vertical
+    // Ajuste visual fila a fila: zebra, precios, stocks y promo
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = 90;
-      row.font = { size: 13 };
-      campos.forEach((campo, idx) => {
-        const cell = row.getCell(idx + 1);
-        if (campo === "descripcion") {
-          cell.alignment = { wrapText: true, vertical: "middle", horizontal: "center" };
-        } else if (campo === "ean13") {
-          cell.alignment = { textRotation: 90, horizontal: "center", vertical: "center" };
-        } else {
-          cell.alignment = { horizontal: "center", vertical: "center" };
+      row.font = { size: 13, name: 'Segoe UI' };
+      const zebraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebraColors[(i%2)] } };
+      let cod = row.getCell(1).value?.toString().trim();
+      let esPromo = articulos_promocion.has(cod);
+      let stock = Number(row.getCell(3).value || 0);
+      for (let j = 1; j <= campos.length; j++) {
+        let cell = row.getCell(j);
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: (campos[j-1] === "ean13" ? 90 : 0)};
+        cell.fill = zebraColor;
+        cell.border = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}}};
+        // Colorea Precio de promociones
+        if (campos[j-1] === "precioVenta" && esPromo) {
+          cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb: 'FFBBDEFB'} };
+          cell.font = {...cell.font, color: {argb: 'FF1565C0'}, italic: true };
+          cell.value = cell.value != null ? `${cell.value} PROMO` : 'PROMO';
         }
-      });
+        // Stock bajo
+        if (campos[j-1] === "disponible") {
+          if (stock <= 10) {
+            cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb:'FFFFCDD2'} };
+            cell.font = {...cell.font, color: {argb:'FFD32F2F'}, bold:true };
+          } else if (stock <= 20) {
+            cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb:'FFFFF9C4'} };
+            cell.font = {...cell.font, color: {argb:'FFF9A825'}, bold:true };
+          }
+        }
+        // Precio normal
+        if (campos[j-1] === "precioVenta" && !esPromo) {
+          cell.font = {...cell.font, color: {argb:'FF1976D2'}, bold:true};
+          cell.alignment = {...cell.alignment, horizontal: 'right'};
+        }
+      }
     }
 
-    // Inserción de imágenes vía API español (opcional)
+    // Imágenes igual que siempre
     if (!sinImagenes) {
       const limit = pLimit(3);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
