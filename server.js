@@ -1,4 +1,5 @@
-// server.js — Backend ATOSA con detección robusta de artículos promocionales para cualquier idioma
+// server.js — Backend ATOSA
+// Lógica óptima: precios, stock y promociones siempre en español; descripción en el idioma elegido
 
 const express = require('express');
 const axios = require('axios');
@@ -11,28 +12,27 @@ const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
 
 const app = express();
-app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Ajusta si tu frontend es otro dominio
+app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
 const diccionario_traduccion = {
-  Español:    { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
-  Inglés:     { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
-  Francés:    { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
-  Italiano:   { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
+  Español:   { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
+  Inglés:    { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
+  Francés:   { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
+  Italiano:  { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
 const usuarios_api = {
-  Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
-  Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" }, // SIN acento
-  Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
+  Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
+  Inglés:    { usuario: "ingles@atosa.es", password: "AtosaIngles" },
+  Francés:   { usuario: "frances@atosa.es", password: "AtosaFrances" },
+  Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-// Usuarios para comparación de promociones/descuento
 const usuario4 = { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 
 const jobs = {};
 
-// ENDPOINTS BÁSICOS
+// ENDPOINTS
 
 app.get('/api/grupos', async (req, res) => {
   try {
@@ -85,7 +85,8 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// LÓGICA PRINCIPAL
+// LÓGICA PRINCIPAL DE GENERACIÓN
+
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -93,7 +94,6 @@ async function generarExcelAsync(params, jobId) {
     const workbookGrupos = XLSX.readFile('./grupos.xlsx');
     const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
-    // Codifica todo como string y limpia blancos
     const codigosGrupo = grupos
       .filter(row => row.grupo === grupo)
       .map(row => (row.codigo ? row.codigo.toString().trim() : null))
@@ -105,8 +105,8 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Descarga artículos usuario principal (idioma)
-    const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
+    // --- SIEMPRE base en español para todas las lógicas de precio, stock, etc. ---
+    const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
     let resp0;
@@ -117,25 +117,46 @@ async function generarExcelAsync(params, jobId) {
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
     } catch (err) {
-      jobs[jobId].error = "Error autenticando usuario principal de Atosa (" + idioma + "): " + (err.response?.status || "") + " " + (err.response?.data || "");
+      jobs[jobId].error = "Error autenticando usuario principal de Atosa (Español): " + (err.response?.status || "") + " " + (err.response?.data || "");
       jobs[jobId].progress = 100;
       return;
     }
 
-    const articulos = resp0.data
+    const articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
-        (!soloStock || parseInt(art.disponible || 0) > 0)
-      ).slice(0, maxFilas);
+        (!soloStock || parseInt(art.disponible || 0) > 0) )
+      .slice(0, maxFilas);
 
-    if (!articulos.length) {
+    if (!articulos_base.length) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
       jobs[jobId].progress = 100;
       return;
     }
 
-    // -------- LÓGICA DETECCIÓN PROMOCIONALES --------
-    // Solo para descuento > 0
+    // --- OBTENER DESCRIPCIÓN EN IDIOMA (si es diferente al español) ---
+    let descripcionesExtra = {};
+    if (idioma !== "Español") {
+      try {
+        // Coge solo descripciones y códigos
+        const userIdioma = usuarios_api[idioma];
+        const respIdioma = await axios.get(apiURL, {
+          auth: { username: userIdioma.usuario, password: userIdioma.password },
+          timeout: 70000,
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+        });
+        for (const art of respIdioma.data) {
+          if (art.codigo && art.descripcion) {
+            descripcionesExtra[art.codigo.toString().trim()] = art.descripcion;
+          }
+        }
+      } catch (e) {
+        // Si falla, usa la descripción española
+        descripcionesExtra = {};
+      }
+    }
+
+    // -------- LÓGICA DETECCIÓN PROMOCIONALES, SIEMPRE EN ESPAÑOL --------
     let articulos_promocion = new Set();
     if (descuento > 0) {
       let precios4 = {}, precios8 = {};
@@ -152,40 +173,38 @@ async function generarExcelAsync(params, jobId) {
             httpsAgent: new https.Agent({ rejectUnauthorized: false }),
           }),
         ]);
-        // Crear mapas código-precio (de string)
+        // Mapas código-precio (string limpio)
         resp4.data.forEach(a => {
           if (a.codigo && a.precioVenta !== undefined) precios4[a.codigo.toString().trim()] = parseFloat(a.precioVenta);
         });
         resp8.data.forEach(a => {
           if (a.codigo && a.precioVenta !== undefined) precios8[a.codigo.toString().trim()] = parseFloat(a.precioVenta);
         });
-        // Solo promocionales: los que tienen exactamente el mismo precio en usuario 4% y 8%
+        // Promocionales = los que tienen el mismo precio para usuario 4% y usuario 8%
         for (const codigo of Object.keys(precios4)) {
           if (
             precios8[codigo] !== undefined &&
             Math.abs(precios4[codigo] - precios8[codigo]) < 0.01
           ) {
-            articulos_promocion.add(codigo); // Siempre string limpio
+            articulos_promocion.add(codigo);
           }
         }
       } catch (err) {
-        // Si alguna llamada falla, considera todo "sin promoción"
         articulos_promocion = new Set();
       }
     }
 
-    // -------- FORMATO EXCEL IGUAL AL SCRIPT --------
+    // ----------- FORMATO EXCEL IGUAL AL SCRIPT -----------
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Anchuras fijo por columna
+    // Anchos de columna y alineaciones
     const colWidths = { codigo: 12, descripcion: 40, disponible: 12, ean13: 12, precioVenta: 12, umv: 10, imagen: 18 };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
-    // Cabecera: negrita, altura, alineación y rotación EAN13
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true, size: 14 };
     headerRow.height = 90;
@@ -200,12 +219,12 @@ async function generarExcelAsync(params, jobId) {
       }
     });
 
-    let pasoTotal = sinImagenes ? articulos.length : articulos.length * 2;
+    let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
     let pasos = 0;
     let failedFotos = [];
 
-    // Filas de datos
-    articulos.forEach((art, i) => {
+    // Añade filas de datos
+    articulos_base.forEach((art, i) => {
       const fila = [];
       campos.forEach(campo => {
         let valor = art[campo] ?? "";
@@ -219,6 +238,12 @@ async function generarExcelAsync(params, jobId) {
               valor = parseFloat(valor);
             }
           } catch {}
+        } else if (campo === "descripcion" && idioma !== "Español") {
+          // usa la descripción traducida si existe
+          const cod = art.codigo?.toString().trim();
+          if (descripcionesExtra[cod]) {
+            valor = descripcionesExtra[cod];
+          }
         }
         fila.push(valor);
       });
@@ -227,7 +252,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
-    // Formato filas de datos, igual que cabecera
+    // Formateo de filas de datos, idéntico a cabecera
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = 90;
@@ -244,10 +269,10 @@ async function generarExcelAsync(params, jobId) {
       });
     }
 
-    // Inserta imágenes (si corresponde)
+    // Inserta imágenes API si corresponde
     if (!sinImagenes) {
       const limit = pLimit(3);
-      await Promise.all(articulos.map((art, i) => limit(async () => {
+      await Promise.all(articulos_base.map((art, i) => limit(async () => {
         let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password, 2);
         if (fotoBuffer) {
           try {
@@ -284,7 +309,7 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
-// Función auxiliar para obtener fotos solo de la API segura
+// Función de obtención de fotos
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
   for (let i = 0; i < intentos; i++) {
     try {
