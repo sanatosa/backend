@@ -12,14 +12,15 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: 'https://webb2b.netlify.app'
+}));
 app.use(express.json());
 
 const upload = multer({ dest: 'fotos_temp/' });
 
 if (!fs.existsSync('fotos_temp')) fs.mkdirSync('fotos_temp');
 
-// Mapeo de traducción y usuarios API (igual que antes)
 const diccionario_traduccion = {
   Español: { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
   Inglés: { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
@@ -34,12 +35,12 @@ const usuarios_api = {
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
-// Endpoint para grupos (igual que antes)
 app.get('/api/grupos', async (req, res) => {
   try {
+    console.log("[/api/grupos] Descargando Excel de grupos...");
     const response = await axios.get(
-      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
-      { responseType: 'arraybuffer' }
+      'https://aw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
+      { responseType: 'arraybuffer', timeout: 15000 }
     );
     const workbookGrupos = XLSX.read(response.data, { type: 'buffer' });
     const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
@@ -47,56 +48,47 @@ app.get('/api/grupos', async (req, res) => {
     const nombres = [...new Set(grupos.map(row => row.grupo).filter(Boolean))].sort();
     res.json({ grupos: nombres });
   } catch (err) {
+    console.error("[/api/grupos] Error:", err);
     res.status(500).json({ error: "No se pudieron obtener los grupos." });
   }
 });
 
-// ---- GESTIÓN DE JOBS Y PROGRESO EN MEMORIA ----
-const jobs = {}; // jobId: { progress, buffer, error, filename, startedAt, fotosLocales }
+const jobs = {};
 
-// 1. Inicia generación de Excel
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
     const { grupo, fotosDisponibles = [], origenFotos = "local", sinImagenes = false } = req.body;
     const jobId = uuidv4();
     jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now(), fotosLocales: {} };
 
-    // Si se selecciona "local", devolvemos la lista de imágenes requeridas (que el frontend debe subir)
     if (origenFotos === "local" && !sinImagenes) {
-      // Averigua qué imágenes harán falta para el grupo solicitado
-      // Como aún no hay artículos, primero descarga grupos.xlsx y filtra artículos
-      let responseGrupos = await axios.get('https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx', { responseType: 'arraybuffer' });
+      let responseGrupos = await axios.get('https://aw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx', { responseType: 'arraybuffer', timeout: 15000 });
       let workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
       let sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
       let grupos = XLSX.utils.sheet_to_json(sheetGrupos);
       let codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
-      // Nombres requeridos (pueden ser .jpg/.jpeg/.png, adaptalo según tus ficheros)
       const requiredFotos = codigosGrupo.map(c => [`${c}.jpg`, `${c}.jpeg`, `${c}.png`]).flat();
-      // Devuelve al frontend la lista de archivos requeridos que no están en la carpeta local seleccionada
       const faltan = requiredFotos.filter(f => !fotosDisponibles.includes(f.toLowerCase()));
       return res.json({ jobId, requiredFotos: faltan });
     }
 
-    // Si es API o sin imágenes, comienza directo la generación
     generarExcelAsync(req.body, jobId);
     res.json({ jobId });
   } catch (err) {
+    console.error("[/api/genera-excel-final-async] Error:", err);
     res.status(500).json({ error: "Error iniciando la generación del Excel." });
   }
 });
 
-// 2. Subida de fotos locales (solo cuando origenFotos = "local")
 app.post('/api/subir-fotos/:jobId', upload.array('fotos'), (req, res) => {
   const { jobId } = req.params;
   if (!jobs[jobId]) return res.status(404).json({ error: 'Job no encontrado' });
-  // Guarda las rutas temporales en jobs[jobId].fotosLocales
   req.files.forEach(f => {
     jobs[jobId].fotosLocales[f.originalname.toLowerCase()] = f.path;
   });
   res.json({ ok: true });
 });
 
-// 3. Progreso
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -111,7 +103,6 @@ app.get('/api/progreso/:jobId', (req, res) => {
   res.json({ progress: job.progress, error: job.error, filename: job.filename, eta });
 });
 
-// 4. Descarga el archivo generado
 app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -121,16 +112,14 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// 5. Generador Excel
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, origenFotos = "local" } = params;
     const maxFilas = 3500;
 
-    // Leer grupos.xlsx
     let responseGrupos = await axios.get(
-      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
-      { responseType: 'arraybuffer' }
+      'https://aw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
+      { responseType: 'arraybuffer', timeout: 15000 }
     );
     let workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
     let sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
@@ -140,12 +129,11 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].error = "No hay artículos para ese grupo."; jobs[jobId].progress = 100; return;
     }
 
-    // Llama a la API de Atosa
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
     let respArticulos = await axios.get(apiURL, {
       auth: { username: usuario, password: password },
-      timeout: 60_000,
+      timeout: 60000,
       httpsAgent: new https.Agent({ rejectUnauthorized: false }),
     });
     let articulos = respArticulos.data.filter(art =>
@@ -157,7 +145,6 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro."; jobs[jobId].progress = 100; return;
     }
 
-    // Descuentos (como antes)
     let articulos_sin_descuento = new Set();
     if (descuento > 0) {
       try {
@@ -168,7 +155,7 @@ async function generarExcelAsync(params, jobId) {
         const [resp4, resp8] = await Promise.all(usuariosDescuento.map(u =>
           axios.get(apiURL, {
             auth: { username: u.usuario, password: u.password },
-            timeout: 60_000,
+            timeout: 60000,
             httpsAgent: new https.Agent({ rejectUnauthorized: false }),
           })
         ));
@@ -189,7 +176,6 @@ async function generarExcelAsync(params, jobId) {
       } catch (err) { }
     }
 
-    // Crear Excel
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
@@ -240,11 +226,9 @@ async function generarExcelAsync(params, jobId) {
         ws.addRow(fila);
       }
 
-      // Añadir imágenes según el origen
       await Promise.all(articulos.map((art, i) => limit(async () => {
         let fotoBuffer = null;
         if (origenFotos === "local" && jobs[jobId].fotosLocales) {
-          // Busca .jpg, .jpeg, .png por ese código
           for (let ext of ['jpg', 'jpeg', 'png']) {
             const nombre = `${art.codigo}.${ext}`.toLowerCase();
             if (jobs[jobId].fotosLocales[nombre]) {
@@ -287,7 +271,6 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
 
-    // Limpia las fotos temporales
     if (jobs[jobId].fotosLocales) {
       Object.values(jobs[jobId].fotosLocales).forEach(f => {
         try { fs.unlinkSync(f); } catch { }
@@ -297,6 +280,7 @@ async function generarExcelAsync(params, jobId) {
   } catch (err) {
     jobs[jobId].error = "Error generando el Excel (excepción interna).";
     jobs[jobId].progress = 100;
+    console.error("[generarExcelAsync] Error:", err);
   }
 }
 
