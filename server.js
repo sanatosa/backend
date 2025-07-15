@@ -7,48 +7,24 @@ const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const Jimp = require('jimp');
 const pLimit = require('p-limit');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+const upload = multer({ dest: 'fotos_temp/' });
+
+if (!fs.existsSync('fotos_temp')) fs.mkdirSync('fotos_temp');
+
+// Mapeo de traducción y usuarios API (igual que antes)
 const diccionario_traduccion = {
-  Español: {
-    codigo: "Código",
-    descripcion: "Descripción",
-    disponible: "Disponible",
-    ean13: "EAN13",
-    precioVenta: "Precio",
-    umv: "UMV",
-    imagen: "Imagen",
-  },
-  Inglés: {
-    codigo: "Code",
-    descripcion: "Description",
-    disponible: "Available",
-    ean13: "EAN13",
-    precioVenta: "Price",
-    umv: "MOQ",
-    imagen: "Image",
-  },
-  Francés: {
-    codigo: "Code",
-    descripcion: "Description",
-    disponible: "Disponible",
-    ean13: "EAN13",
-    precioVenta: "Prix",
-    umv: "MOQ",
-    imagen: "Image",
-  },
-  Italiano: {
-    codigo: "Codice",
-    descripcion: "Descrizione",
-    disponible: "Disponibile",
-    ean13: "EAN13",
-    precioVenta: "Prezzo",
-    umv: "MOQ",
-    imagen: "Immagine",
-  }
+  Español: { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
+  Inglés: { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
+  Francés: { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
+  Italiano: { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
 
 const usuarios_api = {
@@ -58,22 +34,7 @@ const usuarios_api = {
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 
-// Endpoint para descargar grupos.xlsx del repositorio GitHub (proxy)
-app.get('/grupos.xlsx', async (req, res) => {
-  try {
-    const response = await axios.get(
-      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
-      { responseType: 'arraybuffer' }
-    );
-    res.set('Access-Control-Allow-Origin', '*');
-    res.set('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.send(response.data);
-  } catch (err) {
-    res.status(500).json({ error: "No se pudo descargar el archivo de grupos." });
-  }
-});
-
-// Endpoint para obtener la lista de grupos únicos (para el desplegable)
+// Endpoint para grupos (igual que antes)
 app.get('/api/grupos', async (req, res) => {
   try {
     const response = await axios.get(
@@ -90,163 +51,113 @@ app.get('/api/grupos', async (req, res) => {
   }
 });
 
-// Obtener la primera foto de un artículo en Buffer (jpeg) usando SIEMPRE usuario español
-async function obtenerFotoArticulo(codigo) {
-  const usuario = usuarios_api["Español"].usuario;
-  const password = usuarios_api["Español"].password;
-  try {
-    const fotoResp = await axios.get(
-      `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
-      {
-        auth: { username: usuario, password: password },
-        timeout: 10000,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      }
-    );
-    const fotos = fotoResp.data.fotos;
-    if (Array.isArray(fotos) && fotos.length > 0) {
-      return Buffer.from(fotos[0], 'base64');
-    }
-    return null;
-  } catch (e) {
-    console.log(`No se pudo obtener foto para ${codigo}:`, e.message);
-    return null;
-  }
-}
-
 // ---- GESTIÓN DE JOBS Y PROGRESO EN MEMORIA ----
-const jobs = {}; // jobId: { progress, buffer, error, filename, startedAt }
+const jobs = {}; // jobId: { progress, buffer, error, filename, startedAt, fotosLocales }
 
+// 1. Inicia generación de Excel
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
-    const { grupo } = req.body;
-    if (!grupo || typeof grupo !== 'string' || grupo.trim() === '') {
-      return res.status(400).json({ error: "El parámetro 'grupo' es obligatorio." });
+    const { grupo, fotosDisponibles = [], origenFotos = "local", sinImagenes = false } = req.body;
+    const jobId = uuidv4();
+    jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now(), fotosLocales: {} };
+
+    // Si se selecciona "local", devolvemos la lista de imágenes requeridas (que el frontend debe subir)
+    if (origenFotos === "local" && !sinImagenes) {
+      // Averigua qué imágenes harán falta para el grupo solicitado
+      // Como aún no hay artículos, primero descarga grupos.xlsx y filtra artículos
+      let responseGrupos = await axios.get('https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx', { responseType: 'arraybuffer' });
+      let workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
+      let sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
+      let grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+      let codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
+      // Nombres requeridos (pueden ser .jpg/.jpeg/.png, adaptalo según tus ficheros)
+      const requiredFotos = codigosGrupo.map(c => [`${c}.jpg`, `${c}.jpeg`, `${c}.png`]).flat();
+      // Devuelve al frontend la lista de archivos requeridos que no están en la carpeta local seleccionada
+      const faltan = requiredFotos.filter(f => !fotosDisponibles.includes(f.toLowerCase()));
+      return res.json({ jobId, requiredFotos: faltan });
     }
 
-    const jobId = uuidv4();
-    jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now() };
-
-    console.log(`[${new Date().toISOString()}] Nueva petición de Excel para grupo "${grupo}", jobId: ${jobId}`);
-
+    // Si es API o sin imágenes, comienza directo la generación
     generarExcelAsync(req.body, jobId);
-
     res.json({ jobId });
   } catch (err) {
     res.status(500).json({ error: "Error iniciando la generación del Excel." });
   }
 });
 
-// Endpoint para consultar progreso (con ETA en segundos)
+// 2. Subida de fotos locales (solo cuando origenFotos = "local")
+app.post('/api/subir-fotos/:jobId', upload.array('fotos'), (req, res) => {
+  const { jobId } = req.params;
+  if (!jobs[jobId]) return res.status(404).json({ error: 'Job no encontrado' });
+  // Guarda las rutas temporales en jobs[jobId].fotosLocales
+  req.files.forEach(f => {
+    jobs[jobId].fotosLocales[f.originalname.toLowerCase()] = f.path;
+  });
+  res.json({ ok: true });
+});
+
+// 3. Progreso
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
   if (!job) return res.status(404).json({ error: 'Trabajo no encontrado' });
-
   let eta = null;
   if (job.progress > 2 && job.progress < 99 && job.startedAt) {
-    // Tiempo transcurrido en segundos
     const elapsed = (Date.now() - job.startedAt) / 1000;
-    // Progreso de 0 a 1
     const p = Math.max(job.progress, 1) / 100;
-    // Tiempo estimado total
     const total = elapsed / p;
-    // ETA en segundos
     eta = Math.max(0, Math.round(total - elapsed));
   }
-
-  res.json({
-    progress: job.progress,
-    error: job.error,
-    filename: job.filename,
-    eta // segundos restantes (null si no se puede calcular)
-  });
+  res.json({ progress: job.progress, error: job.error, filename: job.filename, eta });
 });
 
-// Endpoint para descargar el archivo generado
+// 4. Descarga el archivo generado
 app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
-  if (!job || !job.buffer) {
-    return res.status(404).json({ error: 'Archivo no disponible.' });
-  }
+  if (!job || !job.buffer) return res.status(404).json({ error: 'Archivo no disponible.' });
   res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.send(job.buffer);
 });
 
-// -------- GENERADOR EXCEL ASÍNCRONO -----------
+// 5. Generador Excel
 async function generarExcelAsync(params, jobId) {
   try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
-    const maxFilas = 3500; // límite fijo por defecto
+    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, origenFotos = "local" } = params;
+    const maxFilas = 3500;
 
-    // 1. Leer grupos.xlsx desde GitHub
-    let responseGrupos;
-    try {
-      responseGrupos = await axios.get(
-        'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
-        { responseType: 'arraybuffer' }
-      );
-    } catch (err) {
-      jobs[jobId].error = "No se pudo descargar el archivo de grupos.";
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    let workbookGrupos, sheetGrupos, grupos;
-    try {
-      workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
-      sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
-      grupos = XLSX.utils.sheet_to_json(sheetGrupos);
-    } catch (err) {
-      jobs[jobId].error = "No se pudo leer el archivo de grupos.";
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    // 2. Saca los códigos del grupo seleccionado
-    const codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
+    // Leer grupos.xlsx
+    let responseGrupos = await axios.get(
+      'https://raw.githubusercontent.com/sanatosa/proxy/main/grupos.xlsx',
+      { responseType: 'arraybuffer' }
+    );
+    let workbookGrupos = XLSX.read(responseGrupos.data, { type: 'buffer' });
+    let sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
+    let grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+    let codigosGrupo = grupos.filter(row => row.grupo === grupo).map(row => row.codigo?.toString());
     if (!codigosGrupo.length) {
-      jobs[jobId].error = "No hay artículos para ese grupo.";
-      jobs[jobId].progress = 100;
-      return;
+      jobs[jobId].error = "No hay artículos para ese grupo."; jobs[jobId].progress = 100; return;
     }
 
-    // 3. Llama a la API de Atosa con usuario y password según idioma
+    // Llama a la API de Atosa
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
-
-    let respArticulos, articulos;
-    try {
-      respArticulos = await axios.get(apiURL, {
-        auth: { username: usuario, password: password },
-        timeout: 60_000,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      });
-      articulos = respArticulos.data;
-    } catch (err) {
-      jobs[jobId].error = "No se pudo conectar con la API de Atosa.";
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    // 4. Filtra por grupo y stock (si procede)
-    articulos = articulos.filter(art =>
+    let respArticulos = await axios.get(apiURL, {
+      auth: { username: usuario, password: password },
+      timeout: 60_000,
+      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+    });
+    let articulos = respArticulos.data.filter(art =>
       codigosGrupo.includes(art.codigo?.toString()) &&
       (!soloStock || parseInt(art.disponible || 0) > 0)
     );
-
-    // 5. Limita resultados
     articulos = articulos.slice(0, maxFilas);
-
     if (!articulos.length) {
-      jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
-      jobs[jobId].progress = 100;
-      return;
+      jobs[jobId].error = "No hay artículos que coincidan con el filtro."; jobs[jobId].progress = 100; return;
     }
 
-    // 6. Calcula artículos sin descuento (como en tu script)
+    // Descuentos (como antes)
     let articulos_sin_descuento = new Set();
     if (descuento > 0) {
       try {
@@ -275,33 +186,20 @@ async function generarExcelAsync(params, jobId) {
             articulos_sin_descuento.add(cod);
           }
         });
-      } catch (err) {
-        jobs[jobId].error = "No se pudo calcular los descuentos.";
-        jobs[jobId].progress = 100;
-        return;
-      }
+      } catch (err) { }
     }
 
-    // 7. Crear Excel
+    // Crear Excel
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
-
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
-
     ws.addRow(traducido);
-
-    // Ancho y formato de columnas
     const colWidths = [12, 40, 12, 12, 12, 10, 18];
-    ws.columns = ws.columns.map((col, idx) => ({
-      ...col,
-      width: colWidths[idx] || 15
-    }));
-
+    ws.columns = ws.columns.map((col, idx) => ({ ...col, width: colWidths[idx] || 15 }));
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
-    // 8. Añadir filas y procesar imágenes según sinImagenes
     if (sinImagenes) {
       for (let [i, art] of articulos.entries()) {
         let fila = [];
@@ -322,10 +220,8 @@ async function generarExcelAsync(params, jobId) {
         jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
       }
     } else {
-      // CON imágenes (paralelismo)
-      const limit = pLimit(8); // máximo 8 imágenes en paralelo
+      const limit = pLimit(8);
 
-      // Primero añade todas las filas
       for (let [i, art] of articulos.entries()) {
         let fila = [];
         for (let c of campos) {
@@ -344,16 +240,27 @@ async function generarExcelAsync(params, jobId) {
         ws.addRow(fila);
       }
 
-      // Ahora procesa imágenes en paralelo
+      // Añadir imágenes según el origen
       await Promise.all(articulos.map((art, i) => limit(async () => {
-        const fotoBuffer = await obtenerFotoArticulo(art.codigo);
+        let fotoBuffer = null;
+        if (origenFotos === "local" && jobs[jobId].fotosLocales) {
+          // Busca .jpg, .jpeg, .png por ese código
+          for (let ext of ['jpg', 'jpeg', 'png']) {
+            const nombre = `${art.codigo}.${ext}`.toLowerCase();
+            if (jobs[jobId].fotosLocales[nombre]) {
+              fotoBuffer = fs.readFileSync(jobs[jobId].fotosLocales[nombre]);
+              break;
+            }
+          }
+        } else if (origenFotos === "api") {
+          fotoBuffer = await obtenerFotoArticuloAPI(art.codigo);
+        }
         if (fotoBuffer) {
           try {
             let img = await Jimp.read(fotoBuffer);
             img.cover(110, 110);
             img.quality(60);
             const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-
             const imageId = workbook.addImage({
               buffer: miniBuffer,
               extension: 'jpeg'
@@ -362,15 +269,12 @@ async function generarExcelAsync(params, jobId) {
               tl: { col: campos.length - 1, row: i + 1 },
               ext: { width: 110, height: 110 }
             });
-          } catch (e) {
-            console.log(`Error procesando imagen ${art.codigo}:`, e.message);
-          }
+          } catch (e) {}
         }
         jobs[jobId].progress = Math.round(((i + 1) / articulos.length) * 80);
       })));
     }
 
-    // 9. Formato de filas y celdas
     ws.eachRow({ includeEmpty: false }, function(row, rowNumber) {
       row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
       row.height = 90;
@@ -378,32 +282,50 @@ async function generarExcelAsync(params, jobId) {
       else row.font = { size: 13 };
     });
 
-    // 10. Devuelve el archivo Excel (guarda en memoria)
-    let buffer;
-    try {
-      buffer = await workbook.xlsx.writeBuffer();
-    } catch (err) {
-      jobs[jobId].error = "No se pudo generar el archivo Excel.";
-      jobs[jobId].progress = 100;
-      return;
-    }
+    let buffer = await workbook.xlsx.writeBuffer();
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
-    console.log(`[${new Date().toISOString()}] Terminado jobId ${jobId} (${articulos.length} artículos, ${sinImagenes ? 'sin imágenes' : 'con imágenes'})`);
+
+    // Limpia las fotos temporales
+    if (jobs[jobId].fotosLocales) {
+      Object.values(jobs[jobId].fotosLocales).forEach(f => {
+        try { fs.unlinkSync(f); } catch { }
+      });
+      jobs[jobId].fotosLocales = {};
+    }
   } catch (err) {
-    console.error(err);
     jobs[jobId].error = "Error generando el Excel (excepción interna).";
     jobs[jobId].progress = 100;
   }
 }
 
-// Endpoint de prueba para saber si el backend está OK
+async function obtenerFotoArticuloAPI(codigo) {
+  const usuario = usuarios_api["Español"].usuario;
+  const password = usuarios_api["Español"].password;
+  try {
+    const fotoResp = await axios.get(
+      `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
+      {
+        auth: { username: usuario, password: password },
+        timeout: 10000,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      }
+    );
+    const fotos = fotoResp.data.fotos;
+    if (Array.isArray(fotos) && fotos.length > 0) {
+      return Buffer.from(fotos[0], 'base64');
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 app.get('/', (req, res) => {
   res.send('Servidor ATOSA backend funcionando.');
 });
 
-// Inicia el server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Servidor escuchando en puerto ${PORT}`);
