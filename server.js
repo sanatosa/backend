@@ -1,3 +1,5 @@
+// server.js — Backend ATOSA solo imágenes vía API
+
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -10,27 +12,25 @@ const pLimit = require('p-limit').default;
 
 const app = express();
 
-app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Cambia por tu frontend si es diferente
+app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Cambia por la URL de tu frontend si procede
 app.use(express.json());
 
+// Diccionarios de traducción y usuarios de API
 const diccionario_traduccion = {
   Español: { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
   Inglés: { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
   Francés: { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
   Italiano: { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
-
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
   Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
   Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-
-// ---- GESTIÓN DE JOBS (progreso y buffer en memoria) ----
 const jobs = {};
 
-// Endpoint: lista de grupos según tu archivo local
+// API — Grupos disponibles
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -43,7 +43,7 @@ app.get('/api/grupos', async (req, res) => {
   }
 });
 
-// Inicia la generación
+// API — Iniciar generación de Excel (asíncrono)
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = req.body;
@@ -56,7 +56,7 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
   }
 });
 
-// Progreso polling
+// API — Consultar progreso de la tarea
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -71,7 +71,7 @@ app.get('/api/progreso/:jobId', (req, res) => {
   res.json({ progress: job.progress, error: job.error, filename: job.filename, eta });
 });
 
-// Descarga del archivo generado
+// API — Descargar el Excel generado
 app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -81,7 +81,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// --- Lógica generarExcelAsync ---
+// Función principal de generación asíncrona
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -97,7 +97,6 @@ async function generarExcelAsync(params, jobId) {
 
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
-
     let respArticulos = await axios.get(apiURL, {
       auth: { username: usuario, password: password },
       timeout: 60000,
@@ -113,7 +112,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro."; jobs[jobId].progress = 100; return;
     }
 
-    // Aplica lógicas de descuento como en versiones anteriores
+    // Obtener artículos sin descuento en base a otras cuentas, si procede
     let articulos_sin_descuento = new Set();
     if (descuento > 0) {
       try {
@@ -145,24 +144,23 @@ async function generarExcelAsync(params, jobId) {
       } catch {}
     }
 
-    // --- Construcción Excel ---
+    // Preparación del Excel
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // FORMATO: columnas, cabecera bold, centrado, etc.
     const colWidths = [12, 40, 12, 12, 12, 10, 18];
     ws.columns = ws.columns.map((col, idx) => ({ ...col, width: colWidths[idx] || 15 }));
     ws.getRow(1).font = { bold: true };
     ws.getRow(1).alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
 
-    // Barra de progreso y procesamiento
-    let pasoTotal = sinImagenes ? articulos.length : articulos.length * 2; // una vuelta para filas y otra (más lenta) para imágenes
+    let pasoTotal = sinImagenes ? articulos.length : articulos.length * 2;
     let pasos = 0;
     let failedFotos = [];
 
+    // Añadir las filas de datos
     for (let [i, art] of articulos.entries()) {
       let fila = [];
       for (let c of campos) {
@@ -183,11 +181,11 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     }
 
-    // Inserta imágenes solo si se ha seleccionado
+    // Descargar e insertar imágenes si corresponde
     if (!sinImagenes) {
-      const limit = pLimit(4); // baja a 4 si la API da problemas
+      const limit = pLimit(3);
       await Promise.all(articulos.map((art, i) => limit(async () => {
-        let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password);
+        let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password, 2);
         if (fotoBuffer) {
           try {
             let img = await Jimp.read(fotoBuffer);
@@ -206,14 +204,13 @@ async function generarExcelAsync(params, jobId) {
           failedFotos.push(art.codigo);
         }
         pasos++;
-        // La barra nunca baja: calcula sólo incremental
         if (jobs[jobId].progress < 99) {
           jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
         }
       })));
     }
 
-    // Ajusta formato final
+    // Ajuste final de celdas
     ws.eachRow({ includeEmpty: false }, function(row, rowNumber) {
       row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
       row.height = 90;
@@ -225,8 +222,7 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
-
-    // → Puedes notificar en logs o mensajes los códigos sin foto (failedFotos) si deseas
+    // Puedes hacer logging opcional aquí de failedFotos
   } catch (err) {
     jobs[jobId].error = "Error generando el Excel (excepción interna).";
     jobs[jobId].progress = 100;
@@ -234,25 +230,27 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
-// --- DESCARGA DE FOTOS API ---
-async function obtenerFotoArticuloAPI(codigo, usuario, password) {
-  try {
-    const fotoResp = await axios.get(
-      `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
-      {
-        auth: { username: usuario, password: password },
-        timeout: 10000,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+// Descarga de fotos vía API, con reintentos:
+async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
+  for (let i = 0; i < intentos; i++) {
+    try {
+      const fotoResp = await axios.get(
+        `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
+        {
+          auth: { username: usuario, password: password },
+          timeout: 10000,
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+        }
+      );
+      const fotos = fotoResp.data.fotos;
+      if (Array.isArray(fotos) && fotos.length > 0) {
+        return Buffer.from(fotos[0], 'base64');
       }
-    );
-    const fotos = fotoResp.data.fotos;
-    if (Array.isArray(fotos) && fotos.length > 0) {
-      return Buffer.from(fotos[0], 'base64');
+    } catch (e) {
+      await new Promise(res => setTimeout(res, 500));
     }
-    return null;
-  } catch (e) {
-    return null;
   }
+  return null;
 }
 
 app.get('/', (req, res) => res.send('Servidor ATOSA backend funcionando.'));
