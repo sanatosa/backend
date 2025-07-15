@@ -1,5 +1,4 @@
-// server.js — Lógica de descuento EXACTA para detectar artículos promocionales (comparando precios 4% y 8%)
-// y formato Excel idéntico al del script Python con columnas, fuentes y rotación correcta.
+// server.js — Backend ATOSA con detección robusta de artículos promocionales para cualquier idioma
 
 const express = require('express');
 const axios = require('axios');
@@ -12,8 +11,7 @@ const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
 
 const app = express();
-
-app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Cambia si tu frontend es otro
+app.use(cors({ origin: 'https://webb2b.netlify.app' })); // Ajusta si tu frontend es otro dominio
 app.use(express.json());
 
 const diccionario_traduccion = {
@@ -25,23 +23,27 @@ const diccionario_traduccion = {
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
   Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrancés" },
+  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" }, // SIN acento
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-// Usuarios para descuento máximo 4% y 8%
+// Usuarios para comparación de promociones/descuento
 const usuario4 = { usuario: "compras@b2cmarketonline.es", password: "rXCRzzWKI6" };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 
 const jobs = {};
 
-// ENDPOINTS
+// ENDPOINTS BÁSICOS
 
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheet);
-    const nombres = [...new Set(grupos.map(row => row.grupo).filter(Boolean))].sort();
+    const nombres = [...new Set(
+      grupos
+        .map(row => (row.grupo ? row.grupo.toString().trim() : null))
+        .filter(gr => gr && gr.length > 0)
+    )].sort();
     res.json({ grupos: nombres });
   } catch (err) {
     res.status(500).json({ error: "No se pudieron obtener los grupos." });
@@ -83,8 +85,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// LÓGICA DE GENERACIÓN DE EXCEL IDENTICA A TU SCRIPT
-
+// LÓGICA PRINCIPAL
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -92,6 +93,7 @@ async function generarExcelAsync(params, jobId) {
     const workbookGrupos = XLSX.readFile('./grupos.xlsx');
     const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+    // Codifica todo como string y limpia blancos
     const codigosGrupo = grupos
       .filter(row => row.grupo === grupo)
       .map(row => (row.codigo ? row.codigo.toString().trim() : null))
@@ -103,22 +105,28 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // 1. Descarga artículos para usuario de idioma (precio base)
+    // Descarga artículos usuario principal (idioma)
     const { usuario, password } = usuarios_api[idioma] || usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
 
-    const resp0 = await axios.get(apiURL, {
-      auth: { username: usuario, password: password },
-      timeout: 70000,
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-    });
+    let resp0;
+    try {
+      resp0 = await axios.get(apiURL, {
+        auth: { username: usuario, password: password },
+        timeout: 70000,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      });
+    } catch (err) {
+      jobs[jobId].error = "Error autenticando usuario principal de Atosa (" + idioma + "): " + (err.response?.status || "") + " " + (err.response?.data || "");
+      jobs[jobId].progress = 100;
+      return;
+    }
 
     const articulos = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
         (!soloStock || parseInt(art.disponible || 0) > 0)
-      )
-      .slice(0, maxFilas);
+      ).slice(0, maxFilas);
 
     if (!articulos.length) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
@@ -126,9 +134,11 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // 2. Descarga con usuario 4% y 8% SOLO si hay descuento
+    // -------- LÓGICA DETECCIÓN PROMOCIONALES --------
+    // Solo para descuento > 0
     let articulos_promocion = new Set();
     if (descuento > 0) {
+      let precios4 = {}, precios8 = {};
       try {
         const [resp4, resp8] = await Promise.all([
           axios.get(apiURL, {
@@ -142,35 +152,36 @@ async function generarExcelAsync(params, jobId) {
             httpsAgent: new https.Agent({ rejectUnauthorized: false }),
           }),
         ]);
-        // Mapas código:precio como string de código SIEMPRE
-        const precios4 = Object.fromEntries(resp4.data.map(a =>
-          [a.codigo?.toString().trim(), parseFloat(a.precioVenta)]
-        ));
-        const precios8 = Object.fromEntries(resp8.data.map(a =>
-          [a.codigo?.toString().trim(), parseFloat(a.precioVenta)]
-        ));
-        // ARTÍCULOS PROMOCIONALES = los que tienen el mismo precio para usuario 4% y usuario 8%
+        // Crear mapas código-precio (de string)
+        resp4.data.forEach(a => {
+          if (a.codigo && a.precioVenta !== undefined) precios4[a.codigo.toString().trim()] = parseFloat(a.precioVenta);
+        });
+        resp8.data.forEach(a => {
+          if (a.codigo && a.precioVenta !== undefined) precios8[a.codigo.toString().trim()] = parseFloat(a.precioVenta);
+        });
+        // Solo promocionales: los que tienen exactamente el mismo precio en usuario 4% y 8%
         for (const codigo of Object.keys(precios4)) {
           if (
             precios8[codigo] !== undefined &&
             Math.abs(precios4[codigo] - precios8[codigo]) < 0.01
           ) {
-            articulos_promocion.add(codigo);
+            articulos_promocion.add(codigo); // Siempre string limpio
           }
         }
       } catch (err) {
+        // Si alguna llamada falla, considera todo "sin promoción"
         articulos_promocion = new Set();
       }
     }
 
-    // FORMATO IDENTICO AL SCRIPT PYTHON
+    // -------- FORMATO EXCEL IGUAL AL SCRIPT --------
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Ajuste de anchos y alineaciones de columnas
+    // Anchuras fijo por columna
     const colWidths = { codigo: 12, descripcion: 40, disponible: 12, ean13: 12, precioVenta: 12, umv: 10, imagen: 18 };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
@@ -201,7 +212,7 @@ async function generarExcelAsync(params, jobId) {
         if (campo === "precioVenta") {
           try {
             const cod = art.codigo?.toString().trim();
-            // SOLO APLICA DESCUENTO si el artículo NO es promocional
+            // SOLO aplica descuento si el artículo NO es promocional
             if (descuento > 0 && !articulos_promocion.has(cod)) {
               valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
             } else {
@@ -216,7 +227,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 98);
     });
 
-    // Formatos de filas de datos, altura, alineación, especial EAN13
+    // Formato filas de datos, igual que cabecera
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = 90;
@@ -233,7 +244,7 @@ async function generarExcelAsync(params, jobId) {
       });
     }
 
-    // Inserta imágenes si corresponde
+    // Inserta imágenes (si corresponde)
     if (!sinImagenes) {
       const limit = pLimit(3);
       await Promise.all(articulos.map((art, i) => limit(async () => {
@@ -273,6 +284,7 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
+// Función auxiliar para obtener fotos solo de la API segura
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
   for (let i = 0; i < intentos; i++) {
     try {
