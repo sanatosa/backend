@@ -1,6 +1,3 @@
-// server.js — Excel profesional ATOSA, fila de 127px (EAN OK), imagen perfectamente encajada, anchuras compactas,
-// mensajes de avance claros, título de EAN NO rotado, devuelve ETA y fase en API de progreso
-
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -15,11 +12,14 @@ const app = express();
 app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
+const imagenPx = 110;
+const filaAltura = Math.round(imagenPx / 0.75); // 147 puntos Excel
+
 const diccionario_traduccion = {
-  Español:   { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN13", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
-  Inglés:    { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN13", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
-  Francés:   { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN13", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
-  Italiano:  { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN13", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
+  Español:   { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
+  Inglés:    { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
+  Francés:   { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
+  Italiano:  { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
 const usuarios_api = {
   Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
@@ -184,20 +184,26 @@ async function generarExcelAsync(params, jobId) {
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Anchuras modernas y compactas para visual tablet/catálogo
+    // Anchos exactos compactos, imagen=15 ≈ 110px
     const colWidths = { 
       codigo: 11, descripcion: 30, disponible: 10, ean13: 10, 
-      precioVenta: 10, umv: 8, imagen: 17 
+      precioVenta: 10, umv: 8, imagen: 15 
     };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
+    // Cabecera: EAN horizontal solo el título
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
-    headerRow.height = 127;
-    headerRow.eachCell((cell, idx) => {
-      // Solo datos EAN vertical, el título (por defecto, idx de ean13) NO rotado:
-      const rotacion = campos[idx] === "ean13" ? 0 : 0;
-      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: rotacion };
+    headerRow.height = filaAltura;
+
+    campos.forEach((campo, idx) => {
+      const cell = headerRow.getCell(idx+1);
+      cell.alignment = {
+        vertical: "middle",
+        horizontal: "center",
+        wrapText: true,
+        textRotation: 0 // Título EAN horizontal
+      };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1976D2' }};
       cell.border = {bottom: {style: 'thick', color: {argb:'FF1E1E1E'}}};
     });
@@ -210,7 +216,7 @@ async function generarExcelAsync(params, jobId) {
     articulos_base.forEach((art, i) => {
       const fila = [];
       const cod = art.codigo?.toString().trim();
-      campos.forEach((campo, idx) => {
+      campos.forEach(campo => {
         let valor = art[campo] ?? "";
         if (campo === "precioVenta") {
           if (descuento > 0 && !articulos_promocion.has(cod)) {
@@ -225,15 +231,14 @@ async function generarExcelAsync(params, jobId) {
       });
       ws.addRow(fila);
       pasos++;
-      if (pasos === 1) jobs[jobId].fase = "Procesando artículos...";
-      else if (pasos === Math.floor(articulos_base.length / 2)) jobs[jobId].fase = "Filas Excel a medias...";
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     });
 
-    // Ajusta altura todas las filas a 127 y EAN13 vertical solo en datos
+    // DATOS: filas 147 puntos, con EAN rotado solo en datos
+    const idxEAN = campos.indexOf("ean13") + 1;
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
-      row.height = 127;
+      row.height = filaAltura;
       row.font = { size: 13, name: 'Segoe UI' };
       const zebraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebraColors[(i%2)] } };
       let cod = row.getCell(1).value?.toString().trim();
@@ -241,7 +246,7 @@ async function generarExcelAsync(params, jobId) {
       let stock = Number(row.getCell(3).value || 0);
       for (let j = 1; j <= campos.length; j++) {
         let cell = row.getCell(j);
-        let rotate = (campos[j-1] === "ean13") ? 90 : 0;
+        let rotate = (j === idxEAN) ? 90 : 0;
         cell.alignment = { vertical: "middle", horizontal: "center", wrapText: (campos[j-1] === "descripcion"), textRotation: rotate };
         cell.fill = zebraColor;
         cell.border = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}}};
@@ -264,6 +269,8 @@ async function generarExcelAsync(params, jobId) {
           cell.alignment = {...cell.alignment, horizontal: 'right'};
         }
       }
+      // EAN (datos): solo los datos van en vertical
+      row.getCell(idxEAN).alignment = { textRotation: 90, horizontal: "center", vertical: "center", wrapText: true };
     }
 
     if (!sinImagenes) {
@@ -274,13 +281,13 @@ async function generarExcelAsync(params, jobId) {
         if (fotoBuffer) {
           try {
             let img = await Jimp.read(fotoBuffer);
-            img.cover(110, 110);
+            img.cover(imagenPx, imagenPx);
             img.quality(60);
             const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
             const imageId = workbook.addImage({ buffer: miniBuffer, extension: 'jpeg' });
             ws.addImage(imageId, {
               tl: { col: campos.length - 1, row: i + 1 },
-              ext: { width: 110, height: 110 }
+              ext: { width: imagenPx, height: imagenPx }
             });
           } catch (e) {
             failedFotos.push(art.codigo?.toString());
@@ -290,7 +297,6 @@ async function generarExcelAsync(params, jobId) {
         }
         pasos++;
         if (jobs[jobId].progress < 99) {
-          if (pasos === Math.floor(pasoTotal*0.72)) jobs[jobId].fase = "Imágenes a medias...";
           jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
         }
       })));
