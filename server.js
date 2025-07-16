@@ -1,4 +1,5 @@
-// server.js — Excel profesional ATOSA: descuento solo si base y 8% difieren, imagen perfectamente encajada, filas 127px, anchuras compactas, y estado visual mejorable
+// server.js — Excel profesional ATOSA, fila de 127px (EAN OK), imagen perfectamente encajada, anchuras compactas,
+// mensajes de avance claros, título de EAN NO rotado, devuelve ETA y fase en API de progreso
 
 const express = require('express');
 const axios = require('axios');
@@ -82,7 +83,7 @@ async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
     const maxFilas = 3500;
-    jobs[jobId].fase = "Preparando grupo";
+    jobs[jobId].fase = "Preparando grupo y artículos";
     const workbookGrupos = XLSX.readFile('./grupos.xlsx');
     const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
@@ -97,11 +98,9 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Base español
     jobs[jobId].fase = "Descargando artículos base";
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
-
     let resp0;
     try {
       resp0 = await axios.get(apiURL, {
@@ -127,8 +126,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // Descripción idioma
-    jobs[jobId].fase = "Descargando descripciones en idioma seleccionado";
+    jobs[jobId].fase = "Descargando descripciones del idioma";
     let descripcionesIdioma = {};
     if (idioma !== "Español") {
       try {
@@ -148,8 +146,7 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // Lógica de descuento/promocional/fijo
-    jobs[jobId].fase = "Consultando precios promocionales";
+    jobs[jobId].fase = "Calculando productos promocionales";
     let articulos_promocion = new Set();
     if (descuento > 0) {
       let precios0 = {}, precios8 = {};
@@ -180,14 +177,14 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // Excel: anchuras y altura optimizados, imagen encajada, EAN vertical
-    jobs[jobId].fase = "Generando filas Excel";
+    jobs[jobId].fase = "Componiendo Excel";
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
+    // Anchuras modernas y compactas para visual tablet/catálogo
     const colWidths = { 
       codigo: 11, descripcion: 30, disponible: 10, ean13: 10, 
       precioVenta: 10, umv: 8, imagen: 17 
@@ -197,8 +194,10 @@ async function generarExcelAsync(params, jobId) {
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
     headerRow.height = 127;
-    headerRow.eachCell(cell => {
-      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: campos[cell.col - 1] === "ean13" ? 90 : 0 };
+    headerRow.eachCell((cell, idx) => {
+      // Solo datos EAN vertical, el título (por defecto, idx de ean13) NO rotado:
+      const rotacion = campos[idx] === "ean13" ? 0 : 0;
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: rotacion };
       cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1976D2' }};
       cell.border = {bottom: {style: 'thick', color: {argb:'FF1E1E1E'}}};
     });
@@ -208,11 +207,10 @@ async function generarExcelAsync(params, jobId) {
     let failedFotos = [];
     let zebraColors = ['FFFFFFFF','FFF3F4F6'];
 
-    // Añade filas
     articulos_base.forEach((art, i) => {
       const fila = [];
       const cod = art.codigo?.toString().trim();
-      campos.forEach(campo => {
+      campos.forEach((campo, idx) => {
         let valor = art[campo] ?? "";
         if (campo === "precioVenta") {
           if (descuento > 0 && !articulos_promocion.has(cod)) {
@@ -227,15 +225,15 @@ async function generarExcelAsync(params, jobId) {
       });
       ws.addRow(fila);
       pasos++;
-      if      (pasos === 1) jobs[jobId].fase = "Procesando artículos...";
+      if (pasos === 1) jobs[jobId].fase = "Procesando artículos...";
       else if (pasos === Math.floor(articulos_base.length / 2)) jobs[jobId].fase = "Filas Excel a medias...";
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     });
 
-    // Ajusta altura de TODAS las filas a 95,25
+    // Ajusta altura todas las filas a 127 y EAN13 vertical solo en datos
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
-      row.height = 95,25;
+      row.height = 127;
       row.font = { size: 13, name: 'Segoe UI' };
       const zebraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebraColors[(i%2)] } };
       let cod = row.getCell(1).value?.toString().trim();
@@ -243,7 +241,8 @@ async function generarExcelAsync(params, jobId) {
       let stock = Number(row.getCell(3).value || 0);
       for (let j = 1; j <= campos.length; j++) {
         let cell = row.getCell(j);
-        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: (campos[j-1] === "descripcion"), textRotation: (campos[j-1] === "ean13" ? 90 : 0)};
+        let rotate = (campos[j-1] === "ean13") ? 90 : 0;
+        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: (campos[j-1] === "descripcion"), textRotation: rotate };
         cell.fill = zebraColor;
         cell.border = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}}};
         if (campos[j-1] === "precioVenta" && esPromo) {
@@ -267,10 +266,9 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // Imágenes perfectamente encajadas (110x110 en celda 127x127)
     if (!sinImagenes) {
       jobs[jobId].fase = "Descargando e insertando imágenes...";
-      const limit = pLimit(3);
+      const limit = pLimit(5);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
         let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password, 2);
         if (fotoBuffer) {
@@ -292,7 +290,7 @@ async function generarExcelAsync(params, jobId) {
         }
         pasos++;
         if (jobs[jobId].progress < 99) {
-          if      (pasos === Math.floor(pasoTotal*0.72)) jobs[jobId].fase = "Imágenes a medias...";
+          if (pasos === Math.floor(pasoTotal*0.72)) jobs[jobId].fase = "Imágenes a medias...";
           jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
         }
       })));
