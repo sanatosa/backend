@@ -1,5 +1,3 @@
-// server.js — Excel profesional ATOSA, título EAN sin rotar, datos EAN rotados, fila y columna de imagen perfectamente cuadradas y compactas, progreso y ETA, lógica de descuentos: solo si base y 8% difieren
-
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -15,19 +13,31 @@ app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
 const imagenPx = 110;
-const filaAltura = Math.round(imagenPx / 1.45); // 147 puntos Excel
+const filaAltura = Math.round(imagenPx / 1.45); // 
 
 const diccionario_traduccion = {
-  Español:   { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
-  Inglés:    { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
-  Francés:   { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
-  Italiano:  { codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile", ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
+  Español: {
+    codigo: "Código", descripcion: "Descripción", disponible: "Disponible",
+    ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen"
+  },
+  Inglés: {
+    codigo: "Code", descripcion: "Description", disponible: "Available",
+    ean13: "EAN", precioVenta: "Price", umv: "MOQ", imagen: "Image"
+  },
+  Francés: {
+    codigo: "Code", descripcion: "Description", disponible: "Disponible",
+    ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image"
+  },
+  Italiano: {
+    codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile",
+    ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine"
+  }
 };
 const usuarios_api = {
-  Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
-  Inglés:    { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés:   { usuario: "frances@atosa.es", password: "AtosaFrances" },
-  Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
+  Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
+  Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
+  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
+  Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
@@ -186,39 +196,31 @@ async function generarExcelAsync(params, jobId) {
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Anchuras exactas, imagen=15 ≈ 110px
-    const colWidths = { 
-      codigo: 11, descripcion: 30, disponible: 10, ean13: 10, 
-      precioVenta: 10, umv: 8, imagen: 15 
+    const colWidths = {
+      codigo: 11, descripcion: 30, disponible: 10, ean13: 10,
+      precioVenta: 10, umv: 8, imagen: 15
     };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
-    // Cabecera: EAN horizontal solo el título
     const headerRow = ws.getRow(1);
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
     headerRow.height = filaAltura;
+    const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
 
     campos.forEach((campo, idx) => {
-      const cell = headerRow.getCell(idx+1);
-      cell.alignment = {
-        vertical: "middle",
-        horizontal: "center",
-        wrapText: true,
-        textRotation: 0 // Título EAN horizontal
-      };
-      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1976D2' }};
-      cell.border = {bottom: {style: 'thick', color: {argb:'FF1E1E1E'}}};
+      const cell = headerRow.getCell(idx + 1);
+      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: 0 };
+      cell.fill = cabeceraColor;
+      cell.border = { bottom: { style: 'thick', color: { argb: 'FF1E1E1E' } } };
     });
 
+    const idxEAN = campos.indexOf("ean13") + 1;
     let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
     let pasos = 0;
-    let failedFotos = [];
-    let zebraColors = ['FFFFFFFF','FFF3F4F6'];
-
-    articulos_base.forEach((art, i) => {
+    for (const art of articulos_base) {
       const fila = [];
       const cod = art.codigo?.toString().trim();
-      campos.forEach(campo => {
+      for (const campo of campos) {
         let valor = art[campo] ?? "";
         if (campo === "precioVenta") {
           if (descuento > 0 && !articulos_promocion.has(cod)) {
@@ -230,110 +232,85 @@ async function generarExcelAsync(params, jobId) {
           if (descripcionesIdioma[cod]) valor = descripcionesIdioma[cod];
         }
         fila.push(valor);
-      });
+      }
       ws.addRow(fila);
       pasos++;
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
-    });
+    }
 
-    // DATOS: filas 147 puntos, con EAN rotado solo en datos
-    const idxEAN = campos.indexOf("ean13") + 1;
-    ws.getRow(1).getCell(idxEAN).alignment = { horizontal: "center", vertical: "center" }; // Título EAN NO rotado
-    for (let i = 1; i <= ws.rowCount; i++) {
+    for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
-      row.font = { size: 13, name: 'Segoe UI' };
-      const zebraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebraColors[(i%2)] } };
-      let cod = row.getCell(1).value?.toString().trim();
-      let esPromo = articulos_promocion.has(cod);
-      let stock = Number(row.getCell(3).value || 0);
+      const zebra = i % 2 === 0 ? 'FFF3F4F6' : 'FFFFFFFF';
       for (let j = 1; j <= campos.length; j++) {
-        let cell = row.getCell(j);
-        let rotate = (i > 1 && j === idxEAN) ? 90 : 0; // solo datos, NO título, rotados
-        cell.alignment = { vertical: "middle", horizontal: "center", wrapText: (campos[j-1] === "descripcion"), textRotation: rotate };
-        cell.fill = zebraColor;
-        cell.border = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}}};
-        if (campos[j-1] === "precioVenta" && esPromo) {
-          cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb: 'FFBBDEFB'} };
-          cell.font = {...cell.font, color: {argb: 'FF1565C0'}, italic: true };
-          cell.value = cell.value != null ? `${cell.value} PROMO` : 'PROMO';
-        }
-        if (campos[j-1] === "disponible") {
-          if (stock <= 10) {
-            cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb:'FFFFCDD2'} };
-            cell.font = {...cell.font, color: {argb:'FFD32F2F'}, bold:true };
-          } else if (stock <= 20) {
-            cell.fill = { type: 'pattern', pattern:'solid', fgColor: {argb:'FFFFF9C4'} };
-            cell.font = {...cell.font, color: {argb:'FFF9A825'}, bold:true };
-          }
-        }
-        if (campos[j-1] === "precioVenta" && !esPromo) {
-          cell.font = {...cell.font, color: {argb:'FF1976D2'}, bold:true};
-          cell.alignment = {...cell.alignment, horizontal: 'right'};
-        }
+        const cell = row.getCell(j);
+        const isEAN = j === idxEAN;
+        const fontSize = isEAN ? 10 : 13;
+        cell.alignment = {
+          vertical: "middle",
+          horizontal: "center",
+          wrapText: campos[j - 1] === "descripcion",
+          textRotation: isEAN ? 90 : 0
+        };
+        cell.font = { size: fontSize, name: 'Segoe UI' };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebra } };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFCCCCCC' } },
+          bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } }
+        };
       }
     }
 
     if (!sinImagenes) {
-      jobs[jobId].fase = "Descargando e insertando imágenes...";
+      jobs[jobId].fase = "Insertando imágenes...";
       const limit = pLimit(5);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
-        let fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuario, password, 2);
+        const fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 2);
         if (fotoBuffer) {
           try {
-            let img = await Jimp.read(fotoBuffer);
+            const img = await Jimp.read(fotoBuffer);
             img.cover(imagenPx, imagenPx);
-            img.quality(60);
-            const miniBuffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-            const imageId = workbook.addImage({ buffer: miniBuffer, extension: 'jpeg' });
-            ws.addImage(imageId, {
+            const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
+            const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
+            ws.addImage(imgId, {
               tl: { col: campos.length - 1, row: i + 1 },
               ext: { width: imagenPx, height: imagenPx }
             });
-          } catch (e) {
-            failedFotos.push(art.codigo?.toString());
-          }
-        } else {
-          failedFotos.push(art.codigo?.toString());
+          } catch {}
         }
         pasos++;
-        if (jobs[jobId].progress < 99) {
-          jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
-        }
+        jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
       })));
     }
 
-    jobs[jobId].fase = "Finalizando y guardando Excel...";
-    let buffer = await workbook.xlsx.writeBuffer();
+    jobs[jobId].fase = "Finalizando";
+    const buffer = await workbook.xlsx.writeBuffer();
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
   } catch (err) {
-    jobs[jobId].error = "Error generando el Excel (excepción interna).";
+    jobs[jobId].error = "Error generando el Excel.";
     jobs[jobId].progress = 100;
     jobs[jobId].fase = "Error";
-    console.error("[generarExcelAsync] Error:", err);
+    console.error(err);
   }
 }
 
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
   for (let i = 0; i < intentos; i++) {
     try {
-      const fotoResp = await axios.get(
-        `https://b2b.atosa.es:880/api/articulos/foto/${codigo}`,
-        {
-          auth: { username: usuario, password: password },
-          timeout: 10000,
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-        }
-      );
-      const fotos = fotoResp.data.fotos;
+      const resp = await axios.get(`https://b2b.atosa.es:880/api/articulos/foto/${codigo}`, {
+        auth: { username: usuario, password },
+        timeout: 10000,
+        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+      });
+      const fotos = resp.data.fotos;
       if (Array.isArray(fotos) && fotos.length > 0) {
         return Buffer.from(fotos[0], 'base64');
       }
     } catch (e) {
-      await new Promise(res => setTimeout(res, 500));
+      await new Promise(r => setTimeout(r, 500));
     }
   }
   return null;
@@ -341,4 +318,4 @@ async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
 
 app.get('/', (req, res) => res.send('Servidor ATOSA backend funcionando.'));
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Servidor escuchando en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`Escuchando en puerto ${PORT}`));
