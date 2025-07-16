@@ -1,3 +1,5 @@
+// server.js — Excel profesional ATOSA, título EAN sin rotar, datos EAN rotados, fila y columna de imagen perfectamente cuadradas y compactas, progreso y ETA, lógica de descuentos: solo si base y 8% difieren
+
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -184,7 +186,7 @@ async function generarExcelAsync(params, jobId) {
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
 
-    // Anchos exactos compactos, imagen=15 ≈ 110px
+    // Anchuras exactas, imagen=15 ≈ 110px
     const colWidths = { 
       codigo: 11, descripcion: 30, disponible: 10, ean13: 10, 
       precioVenta: 10, umv: 8, imagen: 15 
@@ -236,7 +238,8 @@ async function generarExcelAsync(params, jobId) {
 
     // DATOS: filas 147 puntos, con EAN rotado solo en datos
     const idxEAN = campos.indexOf("ean13") + 1;
-    for (let i = 2; i <= ws.rowCount; i++) {
+    ws.getRow(1).getCell(idxEAN).alignment = { horizontal: "center", vertical: "center" }; // Título EAN NO rotado
+    for (let i = 1; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
       row.font = { size: 13, name: 'Segoe UI' };
@@ -246,7 +249,7 @@ async function generarExcelAsync(params, jobId) {
       let stock = Number(row.getCell(3).value || 0);
       for (let j = 1; j <= campos.length; j++) {
         let cell = row.getCell(j);
-        let rotate = (j === idxEAN) ? 90 : 0;
+        let rotate = (i > 1 && j === idxEAN) ? 90 : 0; // solo datos, NO título, rotados
         cell.alignment = { vertical: "middle", horizontal: "center", wrapText: (campos[j-1] === "descripcion"), textRotation: rotate };
         cell.fill = zebraColor;
         cell.border = {top:{style:'thin',color:{argb:'FFCCCCCC'}},bottom:{style:'thin',color:{argb:'FFCCCCCC'}}};
@@ -269,8 +272,6 @@ async function generarExcelAsync(params, jobId) {
           cell.alignment = {...cell.alignment, horizontal: 'right'};
         }
       }
-      // EAN (datos): solo los datos van en vertical
-      row.getCell(idxEAN).alignment = { textRotation: 90, horizontal: "center", vertical: "center", wrapText: true };
     }
 
     if (!sinImagenes) {
