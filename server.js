@@ -13,7 +13,7 @@ app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
 const imagenPx = 110;
-const filaAltura = Math.round(imagenPx / 1.45); // 
+const filaAltura = Math.round(imagenPx / 1.43); // 
 
 const diccionario_traduccion = {
   Español: {
