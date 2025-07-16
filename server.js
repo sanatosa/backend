@@ -15,7 +15,7 @@ app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
 const imagenPx = 110;
-const filaAltura = Math.round(imagenPx / 1.50); // 147 puntos Excel
+const filaAltura = Math.round(imagenPx / 1.45); // 147 puntos Excel
 
 const diccionario_traduccion = {
   Español:   { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
