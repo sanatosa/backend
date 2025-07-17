@@ -1,3 +1,5 @@
+// server.js — ATOSA Excel, alto de fila 80 puntos exactos, cabecera morada, columna EAN datos font 10
+
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -12,8 +14,9 @@ const app = express();
 app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
+// --- Cambia solo aquí el alto de la fila ---
 const imagenPx = 110;
-const filaAltura = Math.round(imagenPx / 0.75); // 147 puntos Excel
+const filaAltura = 80.0; // ← Altura de fila en puntos Excel, según tu requerimiento
 
 const diccionario_traduccion = {
   Español: {
@@ -47,9 +50,7 @@ app.get('/api/grupos', async (req, res) => {
     const workbook = XLSX.readFile('./grupos.xlsx');
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheet);
-    const nombres = [...new Set(
-      grupos.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0)
-    )].sort();
+    const nombres = [...new Set(grupos.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0))].sort();
     res.json({ grupos: nombres });
   } catch (err) {
     res.status(500).json({ error: "No se pudieron obtener los grupos." });
@@ -129,8 +130,7 @@ async function generarExcelAsync(params, jobId) {
     const articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
-        (!soloStock || parseInt(art.disponible || 0) > 0))
-      .slice(0, maxFilas);
+        (!soloStock || parseInt(art.disponible || 0) > 0)).slice(0, maxFilas);
 
     if (!articulos_base.length) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
@@ -266,12 +266,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].fase = "Insertando imágenes...";
       const limit = pLimit(5);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
-        const fotoBuffer = await obtenerFotoArticuloAPI(
-          art.codigo,
-          usuarios_api["Español"].usuario,
-          usuarios_api["Español"].password,
-          2
-        );
+        const fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 2);
         if (fotoBuffer) {
           try {
             const img = await Jimp.read(fotoBuffer);
