@@ -1,4 +1,4 @@
-// server.js — ATOSA Excel, alto de fila 80 puntos exactos, cabecera morada, columna EAN datos font 10
+// server.js — ATOSA Excel: cabecera morada, datos EAN font 10, imágenes encajadas, alto de fila 82.0 puntos Excel
 
 const express = require('express');
 const axios = require('axios');
@@ -16,7 +16,7 @@ app.use(express.json());
 
 // --- Cambia solo aquí el alto de la fila ---
 const imagenPx = 110;
-const filaAltura = 80.0; // ← Altura de fila en puntos Excel, según tu requerimiento
+const filaAltura = 82.0; // ← Altura de fila en puntos Excel, según tu requerimiento
 
 const diccionario_traduccion = {
   Español: {
@@ -202,7 +202,7 @@ async function generarExcelAsync(params, jobId) {
     };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
-    // -------- CABECERA de títulos con color exclusivo --------
+    // Cabecera visual morada
     const headerRow = ws.getRow(1);
     const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
@@ -217,6 +217,7 @@ async function generarExcelAsync(params, jobId) {
     const idxEAN = campos.indexOf("ean13") + 1;
     let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
     let pasos = 0;
+
     for (const art of articulos_base) {
       const fila = [];
       const cod = art.codigo?.toString().trim();
@@ -238,7 +239,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     }
 
-    // ---- FORMATO FILAS DE DATOS: zebra, tamaño fuente columna EAN ----
+    // Zebra y formato fila datos, EAN font 10 solo en datos
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
