@@ -97,9 +97,9 @@ async function crearImagenPorDefecto() {
   return await img.getBufferAsync(Jimp.MIME_JPEG);
 }
 
-// NUEVA FUNCIÓN: Enviar email con adjunto
+// Función para enviar email con adjunto
 async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
-  const transporter = nodemailer.createTransporter({
+  const transporter = nodemailer.createTransport({  // ← Corregido: createTransport
     service: 'gmail',
     auth: {
       user: process.env.EMAIL_USER,
@@ -127,6 +127,7 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
     console.error(`Error enviando email: ${error.message}`);
   }
 }
+
 
 app.get('/api/grupos', async (req, res) => {
   try {
