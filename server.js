@@ -9,6 +9,8 @@ const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
+require('dotenv').config();
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(cors({ origin: 'https://webb2b.netlify.app' }));
@@ -95,6 +97,37 @@ async function crearImagenPorDefecto() {
   return await img.getBufferAsync(Jimp.MIME_JPEG);
 }
 
+// Función para enviar email con adjunto
+async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
+  const transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    }
+  });
+
+  const mailOptions = {
+    from: process.env.EMAIL_FROM,
+    to: emailDestino,
+    subject: 'Tu archivo Excel está listo',
+    text: 'Adjuntamos el listado generado. ¡Gracias por usar la herramienta!',
+    attachments: [
+      {
+        filename: filename,
+        content: bufferExcel
+      }
+    ]
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`Email enviado a ${emailDestino}`);
+  } catch (error) {
+    console.error(`Error enviando email: ${error.message}`);
+  }
+}
+
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -109,10 +142,10 @@ app.get('/api/grupos', async (req, res) => {
 
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = req.body;
+    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = req.body;
     const jobId = uuidv4();
     jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now(), fase: "Preparando" };
-    generarExcelAsync({ grupo, idioma, descuento, soloStock, sinImagenes }, jobId);
+    generarExcelAsync({ grupo, idioma, descuento, soloStock, sinImagenes, email }, jobId);
     res.json({ jobId });
   } catch (err) {
     res.status(500).json({ error: "Error iniciando la generación del Excel." });
@@ -147,7 +180,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
 
 async function generarExcelAsync(params, jobId) {
   try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
+    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
     const maxFilas = 3500;
 
     jobs[jobId].fase = "Preparando grupo y artículos";
@@ -436,6 +469,13 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
+
+    // Enviar email si se proporcionó
+    if (email) {
+      jobs[jobId].fase = "Enviando email...";
+      await enviarEmailConAdjunto(email, jobs[jobId].buffer, jobs[jobId].filename);
+      jobs[jobId].fase = "Email enviado";
+    }
 
   } catch (err) {
     jobs[jobId].error = `Error generando Excel: ${err.message}`;
