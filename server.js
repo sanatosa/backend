@@ -18,7 +18,7 @@ require('dotenv').config();
 const nodemailer = require('nodemailer');
 
 // Importar esquemas de MongoDB
-const { Orden, Grupo } = require('./models/schemas');
+const { Orden, Grupo } = require('./schemas');
 
 const app = express();
 app.use(cors({ origin: 'https://webb2b.netlify.app' }));
