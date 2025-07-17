@@ -21,17 +21,25 @@ const nodemailer = require('nodemailer');
 const { Orden, Grupo } = require('./schemas');
 
 const app = express();
-app.use(cors({ origin: 'https://webb2b.netlify.app' }));
+
+// ✅ CAMBIO 1: CORS actualizado para permitir credenciales
+app.use(cors({ 
+  origin: 'https://webb2b.netlify.app',
+  credentials: true  // ← Permite enviar cookies cross-domain
+}));
+
 app.use(express.json());
 
-// Configuración de sesiones para admin
+// ✅ CAMBIO 2: Configuración de sesiones actualizada para cross-domain
 app.use(session({
   secret: process.env.ADMIN_SECRET || 'tu-clave-secreta-admin-2025',
   resave: false,
   saveUninitialized: false,
   cookie: { 
-    secure: false, // Cambiar a true en producción con HTTPS
-    maxAge: 1000 * 60 * 60 * 2 // 2 horas
+    secure: false,         // Mantén en false para HTTP
+    maxAge: 1000 * 60 * 60 * 2,  // 2 horas
+    sameSite: 'none',      // ← Permite cookies cross-domain
+    httpOnly: true         // ← Seguridad adicional
   }
 }));
 
