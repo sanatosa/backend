@@ -49,6 +49,51 @@ const usuarios_api = {
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
 
+// NUEVA FUNCIONALIDAD: Cargar orden de artículos
+let ordenArticulos = {};
+
+function cargarOrdenArticulos() {
+  try {
+    const workbookOrden = XLSX.readFile('./orden.xlsx');
+    const sheetOrden = workbookOrden.Sheets[workbookOrden.SheetNames[0]];
+    const datosOrden = XLSX.utils.sheet_to_json(sheetOrden, { header: ['orden', 'codigo'] });
+    
+    // Crear un mapa de código -> orden
+    ordenArticulos = {};
+    datosOrden.forEach(row => {
+      if (row.codigo && row.orden !== undefined) {
+        ordenArticulos[row.codigo.toString().trim()] = parseInt(row.orden) || 999999;
+      }
+    });
+    
+    console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del archivo orden.xlsx`);
+  } catch (error) {
+    console.error('Error cargando orden.xlsx:', error.message);
+    ordenArticulos = {}; // Si no se puede cargar, usar objeto vacío
+  }
+}
+
+// NUEVA FUNCIONALIDAD: Función para ordenar artículos según orden.xlsx
+function ordenarArticulos(articulos) {
+  return articulos.sort((a, b) => {
+    const codigoA = a.codigo ? a.codigo.toString().trim() : '';
+    const codigoB = b.codigo ? b.codigo.toString().trim() : '';
+    
+    const ordenA = ordenArticulos[codigoA] || 999999; // Si no existe, va al final
+    const ordenB = ordenArticulos[codigoB] || 999999; // Si no existe, va al final
+    
+    // Si ambos tienen el mismo orden (999999 = no encontrados), ordenar por código
+    if (ordenA === ordenB) {
+      return codigoA.localeCompare(codigoB);
+    }
+    
+    return ordenA - ordenB;
+  });
+}
+
+// Cargar el orden al iniciar el servidor
+cargarOrdenArticulos();
+
 // Función mejorada para obtener fotos con reintentos
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
   for (let i = 0; i < intentos; i++) {
@@ -99,7 +144,7 @@ async function crearImagenPorDefecto() {
 
 // Función para enviar email con adjunto
 async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
-  const transporter = nodemailer.createTransport({  // ← Corregido: createTransport
+  const transporter = nodemailer.createTransport({
     service: 'gmail',
     auth: {
       user: process.env.EMAIL_USER,
@@ -128,7 +173,6 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   }
 }
 
-
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -143,11 +187,9 @@ app.get('/api/grupos', async (req, res) => {
 
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
-    // MODIFICACIÓN: Añadir email al destructuring
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = req.body;
     const jobId = uuidv4();
     jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now(), fase: "Preparando" };
-    // MODIFICACIÓN: Pasar email a la función
     generarExcelAsync({ grupo, idioma, descuento, soloStock, sinImagenes, email }, jobId);
     res.json({ jobId });
   } catch (err) {
@@ -183,7 +225,6 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
 
 async function generarExcelAsync(params, jobId) {
   try {
-    // MODIFICACIÓN: Añadir email al destructuring
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
     const maxFilas = 3500;
 
@@ -221,7 +262,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    const articulos_base = resp0.data
+    let articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
         (!soloStock || parseInt(art.disponible || 0) > 0)).slice(0, maxFilas);
@@ -231,6 +272,11 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = 100;
       return;
     }
+
+    // NUEVA FUNCIONALIDAD: Ordenar artículos según orden.xlsx
+    jobs[jobId].fase = "Ordenando artículos según catálogo";
+    articulos_base = ordenarArticulos(articulos_base);
+    console.log(`Artículos ordenados: ${articulos_base.length} elementos`);
 
     jobs[jobId].fase = "Descargando descripciones del idioma";
     let descripcionesIdioma = {};
@@ -474,7 +520,7 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
 
-    // NUEVA FUNCIONALIDAD: Enviar email si se proporcionó
+    // Enviar email si se proporcionó
     if (email) {
       jobs[jobId].fase = "Enviando email...";
       await enviarEmailConAdjunto(email, jobs[jobId].buffer, jobs[jobId].filename);
