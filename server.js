@@ -1,4 +1,5 @@
-// server.js — ATOSA Excel: imágenes eficientemente reutilizadas por modelo-talla, alta visual profesional, filas 82 puntos alto, cabecera morada, EAN en vertical en datos, fuente EAN 10pt en datos
+// server.js — ATOSA Excel: imágenes realmente reutilizadas por modelo-talla, filas de 82 puntos exactos,
+// cabecera visual destacada, EAN en vertical solo en datos, fuente EAN 10pt solo datos, lógica robusta
 
 const express = require('express');
 const axios = require('axios');
@@ -15,7 +16,7 @@ app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
 const imagenPx = 110;
-const filaAltura = 82.0; // Altura de fila en puntos Excel
+const filaAltura = 82.0; // Altura exacta en puntos para la fila Excel
 
 const diccionario_traduccion = {
   Español: {
@@ -93,10 +94,9 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// Función robusta para clave de modelo-talla (niño/adulto)
+// Función para clave ÚNICA imagen: por modelo y tipo (niño/adulto)
 function claveFoto(descripcion) {
   let texto = (descripcion || '').trim().replace(/\s+/g, ' ').toUpperCase();
-  // Busca patrón final tipo talla
   let match = texto.match(/^(.+?)\s+((?:[0-9]+(?:-[0-9]+)?)|(?:XS|S|M|L|XL|XXL|XS-S|S-M|M-L|L-XL|XL-XXL))$/);
   if (!match) return texto;
   return match[1].trim() + '___' + (/^\d/.test(match[2]) ? 'NINO' : 'ADULTO');
@@ -164,7 +164,7 @@ async function generarExcelAsync(params, jobId) {
             descripcionesIdioma[art.codigo.toString().trim()] = art.descripcion;
           }
         }
-      } catch (e) {
+      } catch {
         descripcionesIdioma = {};
       }
     }
@@ -200,21 +200,32 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    jobs[jobId].fase = "Preparando claves de imagen...";
-    // 1ª ronda: Mapear claves modelo-talla <!-- aquí construimos el set de claves -->
-    const clavesFoto = {};
-    articulos_base.forEach(art => {
-      const clave = claveFoto(art.descripcion || "");
-      if (!clavesFoto[clave]) clavesFoto[clave] = art.codigo; // Usar el primer código para descargar
-    });
+    // --- Nueva lógica de imágenes: 2 PASADAS ---
+    jobs[jobId].fase = "Mapeando claves de imagen...";
+    // 1. Identificar para cada fila la clave de foto asociada
+    const clavesFila = articulos_base.map(art => claveFoto(art.descripcion));
 
-    // 2ª ronda: Descargar todas las imágenes únicas por clave
-    jobs[jobId].fase = "Descargando imágenes únicas por modelo-talla...";
+    // 2. Conjunto único de claves => descarga solo para los modelos necesarios
+    const clavesUnicas = Array.from(new Set(clavesFila));
+    jobs[jobId].fase = "Descargando imágenes únicas...";
     const fotosPorModelo = {};
     const limitFoto = pLimit(5);
-    await Promise.all(Object.entries(clavesFoto).map(([clave, codigo]) => limitFoto(async () => {
-      fotosPorModelo[clave] = await obtenerFotoArticuloAPI(codigo, usuario, password, 2);
-    })));
+    await Promise.all(clavesUnicas.map(clave =>
+      limitFoto(async () => {
+        const idxArt = clavesFila.findIndex(c => c === clave); // Primer artículo con esa clave
+        if (idxArt !== -1) {
+          const codigo = articulos_base[idxArt].codigo;
+          fotosPorModelo[clave] = await obtenerFotoArticuloAPI(
+            codigo,
+            usuario,
+            password,
+            2
+          );
+        } else {
+          fotosPorModelo[clave] = null;
+        }
+      })
+    ));
 
     jobs[jobId].fase = "Componiendo Excel";
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
@@ -244,7 +255,7 @@ async function generarExcelAsync(params, jobId) {
     const idxEAN = campos.indexOf("ean13") + 1;
     let pasoTotal = articulos_base.length + (sinImagenes ? 0 : articulos_base.length), pasos = 0;
 
-    // Filas de datos y zebra, EAN font 10 solo en datos
+    // Filas de datos y formato, EAN font 10 solo en datos
     for (const art of articulos_base) {
       const fila = [];
       const cod = art.codigo?.toString().trim();
@@ -289,10 +300,11 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
+    // PASADA FINAL: insertar foto en todas las filas, usando buffer ya descargado y correctamente compartido según clave
     if (!sinImagenes) {
       jobs[jobId].fase = "Insertando imágenes optimizadas...";
       const limit = pLimit(5);
-      await Promise.all(articulos_base.map((art, i) => limit(async () => {
+      await Promise.all(articulos_base.map((art, idx) => limit(async () => {
         const clave = claveFoto(art.descripcion);
         const fotoBuffer = fotosPorModelo[clave];
         if (fotoBuffer) {
@@ -302,10 +314,10 @@ async function generarExcelAsync(params, jobId) {
             const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
             const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
             ws.addImage(imgId, {
-              tl: { col: campos.length - 1, row: i + 1 },
+              tl: { col: campos.length - 1, row: idx + 2 }, // idx+2: fila Excel real (1=header)
               ext: { width: imagenPx, height: imagenPx }
             });
-          } catch { /* imagen corrupta o error de inserción */ }
+          } catch {/* imagen corrupta o error de inserción */}
         }
         pasos++;
         jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
