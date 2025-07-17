@@ -1,4 +1,5 @@
-// server.js — Optimizado: solo pide una foto por modelo base y la replica para todas las tallas
+// server.js — Preciso y eficiente: UNA petición de foto por modelo base/tipo y alineación perfecta con filas. 
+// Si falla una imagen para ese modelo, intenta reutilizar la de otra talla. Inserta las fotos en la fila correcta.
 
 const express = require('express');
 const axios = require('axios');
@@ -6,11 +7,11 @@ const cors = require('cors');
 const XLSX = require('xlsx');
 const ExcelJS = require('exceljs');
 const https = require('https');
+const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
 const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(cors({ origin: 'https://webb2b.netlify.app' }));
@@ -19,6 +20,7 @@ app.use(express.json());
 const imagenPx = 110;
 const filaAltura = 82.0;
 
+// Traducción de títulos de columnas
 const diccionario_traduccion = {
   Español: {
     codigo: "Código", descripcion: "Descripción", disponible: "Disponible",
@@ -45,6 +47,7 @@ const usuarios_api = {
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
+
 const jobs = {};
 
 app.get('/api/grupos', async (req, res) => {
@@ -100,10 +103,12 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
+// --- Clave "inteligente" para agrupar modelos sin repetir por talla
 function claveFoto(descripcion) {
   let texto = (descripcion || '').trim().replace(/\s+/g, ' ').toUpperCase();
   let match = texto.match(/^(.+?)\s+((?:[0-9]+(?:-[0-9]+)?)|(?:XS|S|M|L|XL|XXL|XS-S|S-M|M-L|L-XL|XL-XXL))$/);
   if (!match) return texto;
+  // Si termina en talla, separa la parte de modelo
   return match[1].trim() + '___' + (/^\d/.test(match[2]) ? 'NINO' : 'ADULTO');
 }
 
@@ -126,12 +131,15 @@ async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 2) {
   return null;
 }
 
+// --- GENERACIÓN ASÍNCRONA DEL EXCEL, UNA FOTO POR MODELO ---
+
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
     const maxFilas = 3500;
     jobs[jobId].fase = "Preparando grupo y artículos";
 
+    // Leer grupos con ruta absoluta
     const xlsxPath = path.join(__dirname, 'grupos.xlsx');
     if (!fs.existsSync(xlsxPath)) {
       jobs[jobId].error = "No se encontró grupos.xlsx en el backend.";
@@ -154,10 +162,11 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].fase = "Descargando artículos base";
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
+
     let resp0;
     try {
       resp0 = await axios.get(apiURL, {
-        auth: { username: usuario, password: password },
+        auth: { username: usuario, password },
         timeout: 70000,
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
@@ -215,10 +224,7 @@ async function generarExcelAsync(params, jobId) {
           if (cod) precios8[cod] = parseFloat(art.precioVenta);
         }
         for (const cod of Object.keys(precios0)) {
-          if (
-            precios8[cod] !== undefined &&
-            Math.abs(precios0[cod] - precios8[cod]) < 0.01
-          ) {
+          if (precios8[cod] !== undefined && Math.abs(precios0[cod] - precios8[cod]) < 0.01) {
             articulos_promocion.add(cod);
           }
         }
@@ -227,31 +233,32 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // ---- AQUÍ VIENE EL CAMBIO CLAVE PARA LA DESCARGA DE FOTOS ----
-
-    jobs[jobId].fase = "Preparando cache de imágenes...";
-    // 1. Clave única por modelo base/tipo (no por talla)
+    // --- CLAVES ÚNICAS POR MODELO/TIPO ---
+    jobs[jobId].fase = "Preparando imágenes únicas de modelo...";
     const clavesFila = articulos_base.map(art => claveFoto(art.descripcion));
     const clavesUnicas = Array.from(new Set(clavesFila));
 
-    // 2. Pide SOLO UNA foto a la API por cada modelo base
+    // FOTO POR MODELO BASE: BUSCA EL PRIMER CÓDIGO CUYA DESCARGA FUNCIONE PARA ESA CLAVE
     const fotosPorModelo = {};
     const limitFoto = pLimit(5);
-
     await Promise.all(clavesUnicas.map(clave =>
       limitFoto(async () => {
-        // Busca primer código de esa clave, puede ser cualquiera de sus tallas
-        const artRef = articulos_base.find(a => claveFoto(a.descripcion) === clave);
-        if (artRef) {
-          fotosPorModelo[clave] = await obtenerFotoArticuloAPI(
-            artRef.codigo,
-            usuario,
-            password,
-            2
-          );
-        } else {
-          fotosPorModelo[clave] = null;
+        // Busca el PRIMER artículo de esa clave cuya foto descargue bien
+        for (const art of articulos_base) {
+          if (claveFoto(art.descripcion) === clave) {
+            const fotoBuffer = await obtenerFotoArticuloAPI(
+              art.codigo,
+              usuario,
+              password,
+              2
+            );
+            if (fotoBuffer) {
+              fotosPorModelo[clave] = fotoBuffer;
+              return;
+            }
+          }
         }
+        fotosPorModelo[clave] = null; // Ninguna talla tenía imagen
       })
     ));
 
@@ -276,9 +283,10 @@ async function generarExcelAsync(params, jobId) {
     });
 
     const idxEAN = campos.indexOf("ean13") + 1;
-    let pasoTotal = articulos_base.length + (sinImagenes ? 0 : articulos_base.length), pasos = 0;
+    let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
+    let pasos = 0;
 
-    // Mapeo entre código y número de fila
+    // Mapea el número de fila real
     const filaPorCodigo = {};
 
     for (const art of articulos_base) {
@@ -300,10 +308,10 @@ async function generarExcelAsync(params, jobId) {
       ws.addRow(fila);
       filaPorCodigo[cod] = ws.lastRow.number;
       pasos++;
-      jobs[jobId].progress = Math.round((pasos / pasoTotal) * 96);
+      jobs[jobId].progress = Math.round((pasos / pasoTotal) * 95);
     }
 
-    // Formato filas y alternado
+    // Formato zebra y ajustes de filas/celdas
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
@@ -327,22 +335,13 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
+    // INSERCIÓN DE IMÁGENES, UNA POR MODELO PERO EN CADA FILA
     if (!sinImagenes) {
       jobs[jobId].fase = "Insertando imágenes...";
       const limit = pLimit(5);
       await Promise.all(articulos_base.map((art) => limit(async () => {
         const clave = claveFoto(art.descripcion);
-        let fotoBuffer = fotosPorModelo[clave];
-        // Si por cualquier razón la foto de este modelo no está descargada (fallo puntual),
-        // intenta buscar la foto en otro artículo previo de la misma clave:
-        if (!fotoBuffer) {
-          for (const key in fotosPorModelo) {
-            if (key === clave && fotosPorModelo[key]) {
-              fotoBuffer = fotosPorModelo[key];
-              break;
-            }
-          }
-        }
+        const fotoBuffer = fotosPorModelo[clave];
         const cod = art.codigo?.toString().trim();
         if (fotoBuffer && filaPorCodigo[cod]) {
           try {
@@ -354,7 +353,7 @@ async function generarExcelAsync(params, jobId) {
               tl: { col: campos.length - 1, row: filaPorCodigo[cod] },
               ext: { width: imagenPx, height: imagenPx }
             });
-          } catch {}
+          } catch { /* error puntual de imagen: salta */ }
         }
         pasos++;
         jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
