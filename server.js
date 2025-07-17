@@ -97,9 +97,9 @@ async function crearImagenPorDefecto() {
   return await img.getBufferAsync(Jimp.MIME_JPEG);
 }
 
-// Función para enviar email con adjunto
+// NUEVA FUNCIÓN: Enviar email con adjunto
 async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
-  const transporter = nodemailer.createTransport({
+  const transporter = nodemailer.createTransporter({
     service: 'gmail',
     auth: {
       user: process.env.EMAIL_USER,
@@ -142,9 +142,11 @@ app.get('/api/grupos', async (req, res) => {
 
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
+    // MODIFICACIÓN: Añadir email al destructuring
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = req.body;
     const jobId = uuidv4();
     jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now(), fase: "Preparando" };
+    // MODIFICACIÓN: Pasar email a la función
     generarExcelAsync({ grupo, idioma, descuento, soloStock, sinImagenes, email }, jobId);
     res.json({ jobId });
   } catch (err) {
@@ -180,6 +182,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
 
 async function generarExcelAsync(params, jobId) {
   try {
+    // MODIFICACIÓN: Añadir email al destructuring
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
     const maxFilas = 3500;
 
@@ -470,7 +473,7 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
 
-    // Enviar email si se proporcionó
+    // NUEVA FUNCIONALIDAD: Enviar email si se proporcionó
     if (email) {
       jobs[jobId].fase = "Enviando email...";
       await enviarEmailConAdjunto(email, jobs[jobId].buffer, jobs[jobId].filename);
