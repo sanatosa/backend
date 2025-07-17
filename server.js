@@ -1,4 +1,4 @@
-// server.js — ATOSA Excel: cabecera morada, datos EAN font 10, imágenes encajadas, alto de fila 82.0 puntos Excel
+// server.js — ATOSA Excel: imágenes eficientemente reutilizadas por modelo-talla, alta visual profesional, filas 82 puntos alto, cabecera morada, EAN en vertical en datos, fuente EAN 10pt en datos
 
 const express = require('express');
 const axios = require('axios');
@@ -14,9 +14,8 @@ const app = express();
 app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
-// --- Cambia solo aquí el alto de la fila ---
 const imagenPx = 110;
-const filaAltura = 82.0; // ← Altura de fila en puntos Excel, según tu requerimiento
+const filaAltura = 82.0; // Altura de fila en puntos Excel
 
 const diccionario_traduccion = {
   Español: {
@@ -50,7 +49,9 @@ app.get('/api/grupos', async (req, res) => {
     const workbook = XLSX.readFile('./grupos.xlsx');
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheet);
-    const nombres = [...new Set(grupos.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0))].sort();
+    const nombres = [...new Set(
+      grupos.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0)
+    )].sort();
     res.json({ grupos: nombres });
   } catch (err) {
     res.status(500).json({ error: "No se pudieron obtener los grupos." });
@@ -92,6 +93,15 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
+// Función robusta para clave de modelo-talla (niño/adulto)
+function claveFoto(descripcion) {
+  let texto = (descripcion || '').trim().replace(/\s+/g, ' ').toUpperCase();
+  // Busca patrón final tipo talla
+  let match = texto.match(/^(.+?)\s+((?:[0-9]+(?:-[0-9]+)?)|(?:XS|S|M|L|XL|XXL|XS-S|S-M|M-L|L-XL|XL-XXL))$/);
+  if (!match) return texto;
+  return match[1].trim() + '___' + (/^\d/.test(match[2]) ? 'NINO' : 'ADULTO');
+}
+
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false } = params;
@@ -130,7 +140,8 @@ async function generarExcelAsync(params, jobId) {
     const articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
-        (!soloStock || parseInt(art.disponible || 0) > 0)).slice(0, maxFilas);
+        (!soloStock || parseInt(art.disponible || 0) > 0))
+      .slice(0, maxFilas);
 
     if (!articulos_base.length) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
@@ -189,6 +200,22 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
+    jobs[jobId].fase = "Preparando claves de imagen...";
+    // 1ª ronda: Mapear claves modelo-talla <!-- aquí construimos el set de claves -->
+    const clavesFoto = {};
+    articulos_base.forEach(art => {
+      const clave = claveFoto(art.descripcion || "");
+      if (!clavesFoto[clave]) clavesFoto[clave] = art.codigo; // Usar el primer código para descargar
+    });
+
+    // 2ª ronda: Descargar todas las imágenes únicas por clave
+    jobs[jobId].fase = "Descargando imágenes únicas por modelo-talla...";
+    const fotosPorModelo = {};
+    const limitFoto = pLimit(5);
+    await Promise.all(Object.entries(clavesFoto).map(([clave, codigo]) => limitFoto(async () => {
+      fotosPorModelo[clave] = await obtenerFotoArticuloAPI(codigo, usuario, password, 2);
+    })));
+
     jobs[jobId].fase = "Componiendo Excel";
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
@@ -215,9 +242,9 @@ async function generarExcelAsync(params, jobId) {
     });
 
     const idxEAN = campos.indexOf("ean13") + 1;
-    let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
-    let pasos = 0;
+    let pasoTotal = articulos_base.length + (sinImagenes ? 0 : articulos_base.length), pasos = 0;
 
+    // Filas de datos y zebra, EAN font 10 solo en datos
     for (const art of articulos_base) {
       const fila = [];
       const cod = art.codigo?.toString().trim();
@@ -236,10 +263,9 @@ async function generarExcelAsync(params, jobId) {
       }
       ws.addRow(fila);
       pasos++;
-      jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
+      jobs[jobId].progress = Math.round((pasos / pasoTotal) * 96);
     }
 
-    // Zebra y formato fila datos, EAN font 10 solo en datos
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
@@ -264,10 +290,11 @@ async function generarExcelAsync(params, jobId) {
     }
 
     if (!sinImagenes) {
-      jobs[jobId].fase = "Insertando imágenes...";
+      jobs[jobId].fase = "Insertando imágenes optimizadas...";
       const limit = pLimit(5);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
-        const fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 2);
+        const clave = claveFoto(art.descripcion);
+        const fotoBuffer = fotosPorModelo[clave];
         if (fotoBuffer) {
           try {
             const img = await Jimp.read(fotoBuffer);
@@ -278,7 +305,7 @@ async function generarExcelAsync(params, jobId) {
               tl: { col: campos.length - 1, row: i + 1 },
               ext: { width: imagenPx, height: imagenPx }
             });
-          } catch {}
+          } catch { /* imagen corrupta o error de inserción */ }
         }
         pasos++;
         jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
@@ -289,7 +316,7 @@ async function generarExcelAsync(params, jobId) {
     const buffer = await workbook.xlsx.writeBuffer();
     jobs[jobId].buffer = Buffer.from(buffer);
     jobs[jobId].progress = 100;
-    jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
+    jobs[jobId].filename = `listado_${params.grupo}_${params.idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
   } catch (err) {
     jobs[jobId].error = "Error generando el Excel.";
