@@ -13,7 +13,7 @@ app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
 const imagenPx = 110;
-const filaAltura = Math.round(imagenPx / 1.35); // 
+const filaAltura = Math.round(imagenPx / 0.75); // 147 puntos Excel
 
 const diccionario_traduccion = {
   Español: {
@@ -202,11 +202,11 @@ async function generarExcelAsync(params, jobId) {
     };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
+    // -------- CABECERA de títulos con color exclusivo --------
     const headerRow = ws.getRow(1);
+    const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
     headerRow.height = filaAltura;
-    const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
-
     campos.forEach((campo, idx) => {
       const cell = headerRow.getCell(idx + 1);
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: 0 };
@@ -238,6 +238,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     }
 
+    // ---- FORMATO FILAS DE DATOS: zebra, tamaño fuente columna EAN ----
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
@@ -265,7 +266,12 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].fase = "Insertando imágenes...";
       const limit = pLimit(5);
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
-        const fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 2);
+        const fotoBuffer = await obtenerFotoArticuloAPI(
+          art.codigo,
+          usuarios_api["Español"].usuario,
+          usuarios_api["Español"].password,
+          2
+        );
         if (fotoBuffer) {
           try {
             const img = await Jimp.read(fotoBuffer);
