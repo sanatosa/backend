@@ -25,17 +25,20 @@ app.use(cors({
 
 app.use(express.json());
 
+app.set('trust proxy', 1); // Importante si usas proxy o Render/Heroku
 app.use(session({
   secret: process.env.ADMIN_SECRET || 'tu-clave-secreta-admin-2025',
   resave: false,
   saveUninitialized: false,
+  proxy: true, // Esta línea permite cookies seguras tras proxy.
   cookie: {
-    secure: true,          // Solo true si ambos sitios están en HTTPS.
+    secure: true,
     sameSite: 'none',
     httpOnly: true,
     maxAge: 1000 * 60 * 60 * 2
   }
 }));
+
 
 
 mongoose.connect(process.env.MONGODB_URI, {
