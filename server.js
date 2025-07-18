@@ -12,17 +12,20 @@ const pLimit = require('p-limit').default;
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 
+const app = express();
+
+// --- Configuración CORS para Netlify frontend ---
 app.use(cors({
   origin: 'https://webb2b.netlify.app',
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS']
 }));
 app.options('*', cors());
+app.use(express.json());
 
-
-// --- Cambia solo aquí el alto de la fila ---
+// --- Config fijar alto de filas ---
 const imagenPx = 110;
-const filaAltura = 82.0; // ← Altura de fila en puntos Excel, según tu requerimiento
+const filaAltura = 82.0; // ← Altura de fila Excel
 
 const diccionario_traduccion = {
   Español: {
@@ -44,101 +47,78 @@ const diccionario_traduccion = {
 };
 
 const usuarios_api = {
-  Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
-  Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
-  Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
+  Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
+  Inglés:    { usuario: "ingles@atosa.es", password: "AtosaIngles" },
+  Francés:   { usuario: "frances@atosa.es", password: "AtosaFrances" },
+  Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
 
-// NUEVA FUNCIONALIDAD: Cargar orden de artículos
+// --- NUEVA FUNCIONALIDAD: Cargar orden de artículos ---
 let ordenArticulos = {};
-
 function cargarOrdenArticulos() {
   try {
     const workbookOrden = XLSX.readFile('./orden.xlsx');
     const sheetOrden = workbookOrden.Sheets[workbookOrden.SheetNames[0]];
     const datosOrden = XLSX.utils.sheet_to_json(sheetOrden, { header: ['orden', 'codigo'] });
-    
-    // Crear un mapa de código -> orden
     ordenArticulos = {};
     datosOrden.forEach(row => {
       if (row.codigo && row.orden !== undefined) {
         ordenArticulos[row.codigo.toString().trim()] = parseInt(row.orden) || 999999;
       }
     });
-    
     console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del archivo orden.xlsx`);
   } catch (error) {
     console.error('Error cargando orden.xlsx:', error.message);
-    ordenArticulos = {}; // Si no se puede cargar, usar objeto vacío
+    ordenArticulos = {};
   }
 }
 
-// NUEVA FUNCIONALIDAD: Función para ordenar artículos según orden.xlsx
 function ordenarArticulos(articulos) {
   return articulos.sort((a, b) => {
     const codigoA = a.codigo ? a.codigo.toString().trim() : '';
     const codigoB = b.codigo ? b.codigo.toString().trim() : '';
-    
     const ordenA = ordenArticulos[codigoA] || 999999; // Si no existe, va al final
-    const ordenB = ordenArticulos[codigoB] || 999999; // Si no existe, va al final
-    
-    // Si ambos tienen el mismo orden (999999 = no encontrados), ordenar por código
+    const ordenB = ordenArticulos[codigoB] || 999999;
     if (ordenA === ordenB) {
       return codigoA.localeCompare(codigoB);
     }
-    
     return ordenA - ordenB;
   });
 }
 
-// Cargar el orden al iniciar el servidor
+// --- Al iniciar el servidor carga el orden del excel ---
 cargarOrdenArticulos();
 
-// Función mejorada para obtener fotos con reintentos
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
   for (let i = 0; i < intentos; i++) {
     try {
       const resp = await axios.get(`https://b2b.atosa.es:880/api/articulos/foto/${codigo}`, {
         auth: { username: usuario, password },
-        timeout: 15000, // Aumentar timeout
+        timeout: 15000,
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
-      
       const fotos = resp.data.fotos;
       if (Array.isArray(fotos) && fotos.length > 0) {
         const buffer = Buffer.from(fotos[0], 'base64');
-        
-        // Verificar que el buffer sea válido
-        if (buffer.length > 0) {
-          return buffer;
-        }
+        if (buffer.length > 0) return buffer;
       }
     } catch (e) {
       console.log(`Intento ${i + 1} fallido para imagen ${codigo}:`, e.message);
-      if (i < intentos - 1) {
-        await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Delay incremental
-      }
+      if (i < intentos - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
   return null;
 }
 
-// Función para validar buffer de imagen
 function validarBuffer(buffer) {
   if (!buffer || buffer.length === 0) return false;
-  
-  // Verificar headers de imagen comunes
   const jpegHeader = buffer.slice(0, 2).toString('hex') === 'ffd8';
   const pngHeader = buffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a';
-  
   return jpegHeader || pngHeader;
 }
 
-// Función para crear imagen por defecto
 async function crearImagenPorDefecto() {
   const img = new Jimp(imagenPx, imagenPx, '#f0f0f0');
   const font = await Jimp.loadFont(Jimp.FONT_SANS_16_BLACK);
@@ -146,7 +126,6 @@ async function crearImagenPorDefecto() {
   return await img.getBufferAsync(Jimp.MIME_JPEG);
 }
 
-// Función para enviar email con adjunto
 async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -155,20 +134,15 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
       pass: process.env.EMAIL_PASS
     }
   });
-
   const mailOptions = {
     from: process.env.EMAIL_FROM,
     to: emailDestino,
     subject: 'Tu archivo Excel está listo',
     text: 'Adjuntamos el listado generado. ¡Gracias por usar la herramienta!',
     attachments: [
-      {
-        filename: filename,
-        content: bufferExcel
-      }
+      { filename, content: bufferExcel }
     ]
   };
-
   try {
     await transporter.sendMail(mailOptions);
     console.log(`Email enviado a ${emailDestino}`);
@@ -177,6 +151,9 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   }
 }
 
+// ------------------ ENDPOINTS ---------------------------
+
+// Grupos disponibles
 app.get('/api/grupos', async (req, res) => {
   try {
     const workbook = XLSX.readFile('./grupos.xlsx');
@@ -189,6 +166,7 @@ app.get('/api/grupos', async (req, res) => {
   }
 });
 
+// Excel asincrónico (principal)
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = req.body;
@@ -205,7 +183,6 @@ app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
   if (!job) return res.status(404).json({ error: 'Trabajo no encontrado' });
-
   let eta = null;
   if (job.progress > 2 && job.progress < 99 && job.startedAt) {
     const elapsed = (Date.now() - job.startedAt) / 1000;
@@ -213,7 +190,6 @@ app.get('/api/progreso/:jobId', (req, res) => {
     const total = elapsed / p;
     eta = Math.max(0, Math.round(total - elapsed));
   }
-
   res.json({ progress: job.progress, error: job.error, filename: job.filename, eta, fase: job.fase });
 });
 
@@ -221,25 +197,22 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
   if (!job || !job.buffer) return res.status(404).json({ error: 'Archivo no disponible.' });
-
   res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`);
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.send(job.buffer);
 });
 
+// Generador asíncrono de Excel
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
     const maxFilas = 3500;
-
     jobs[jobId].fase = "Preparando grupo y artículos";
 
     const workbookGrupos = XLSX.readFile('./grupos.xlsx');
     const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
-
-    const codigosGrupo = grupos
-      .filter(row => row.grupo === grupo)
+    const codigosGrupo = grupos.filter(row => row.grupo === grupo)
       .map(row => (row.codigo ? row.codigo.toString().trim() : null))
       .filter(Boolean);
 
@@ -252,7 +225,6 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].fase = "Descargando artículos base";
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
-
     let resp0;
     try {
       resp0 = await axios.get(apiURL, {
@@ -269,7 +241,8 @@ async function generarExcelAsync(params, jobId) {
     let articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
-        (!soloStock || parseInt(art.disponible || 0) > 0)).slice(0, maxFilas);
+        (!soloStock || parseInt(art.disponible || 0) > 0)
+      ).slice(0, maxFilas);
 
     if (!articulos_base.length) {
       jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
@@ -277,10 +250,9 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // NUEVA FUNCIONALIDAD: Ordenar artículos según orden.xlsx
+    // Ordenar artículos según catálogo
     jobs[jobId].fase = "Ordenando artículos según catálogo";
     articulos_base = ordenarArticulos(articulos_base);
-    console.log(`Artículos ordenados: ${articulos_base.length} elementos`);
 
     jobs[jobId].fase = "Descargando descripciones del idioma";
     let descripcionesIdioma = {};
@@ -311,18 +283,15 @@ async function generarExcelAsync(params, jobId) {
           const cod = art.codigo ? art.codigo.toString().trim() : null;
           if (cod) precios0[cod] = parseFloat(art.precioVenta);
         }
-
         const resp8 = await axios.get(apiURL, {
           auth: { username: usuario8.usuario, password: usuario8.password },
           timeout: 70000,
           httpsAgent: new https.Agent({ rejectUnauthorized: false }),
         });
-
         for (const art of resp8.data) {
           const cod = art.codigo ? art.codigo.toString().trim() : null;
           if (cod) precios8[cod] = parseFloat(art.precioVenta);
         }
-
         for (const cod of Object.keys(precios0)) {
           if (
             precios8[cod] !== undefined &&
@@ -339,24 +308,19 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].fase = "Componiendo Excel";
     const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
     const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
-
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
-
     const colWidths = {
       codigo: 11, descripcion: 30, disponible: 10, ean13: 10,
       precioVenta: 10, umv: 8, imagen: 15
     };
-
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
-
     // Cabecera visual morada
     const headerRow = ws.getRow(1);
     const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
     headerRow.height = filaAltura;
-
     campos.forEach((campo, idx) => {
       const cell = headerRow.getCell(idx + 1);
       cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: 0 };
@@ -371,7 +335,6 @@ async function generarExcelAsync(params, jobId) {
     for (const art of articulos_base) {
       const fila = [];
       const cod = art.codigo?.toString().trim();
-
       for (const campo of campos) {
         let valor = art[campo] ?? "";
         if (campo === "precioVenta") {
@@ -383,10 +346,8 @@ async function generarExcelAsync(params, jobId) {
         } else if (campo === "descripcion" && idioma !== "Español") {
           if (descripcionesIdioma[cod]) valor = descripcionesIdioma[cod];
         }
-
         fila.push(valor);
       }
-
       ws.addRow(fila);
       pasos++;
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
@@ -397,19 +358,16 @@ async function generarExcelAsync(params, jobId) {
       const row = ws.getRow(i);
       row.height = filaAltura;
       const zebra = i % 2 === 0 ? 'FFF3F4F6' : 'FFFFFFFF';
-
       for (let j = 1; j <= campos.length; j++) {
         const cell = row.getCell(j);
         const isEAN = j === idxEAN;
         const fontSize = isEAN ? 10 : 13;
-
         cell.alignment = {
           vertical: "middle",
           horizontal: "center",
           wrapText: campos[j - 1] === "descripcion",
           textRotation: isEAN ? 90 : 0
         };
-
         cell.font = { size: fontSize, name: 'Segoe UI' };
         cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebra } };
         cell.border = {
@@ -419,55 +377,35 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
-    // Sección mejorada de inserción de imágenes
     if (!sinImagenes) {
       jobs[jobId].fase = "Insertando imágenes...";
-      const limit = pLimit(3); // Reducir concurrencia para mayor estabilidad
-      
-      // Crear imagen por defecto
+      const limit = pLimit(3); // Reducir concurrencia
       const imagenPorDefecto = await crearImagenPorDefecto();
-      
-      // Tracking de imágenes insertadas
       const imagenesInsertadas = new Set();
-      let imagenesExitosas = 0;
-      let imagenesConError = 0;
-      let imagenesDefault = 0;
+      let imagenesExitosas = 0, imagenesConError = 0, imagenesDefault = 0;
 
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
         let fotoBuffer = null;
-        
         try {
-          // Intentar obtener la imagen del artículo
           fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 3);
-          
-          // Si no se pudo obtener, usar imagen por defecto
           if (!fotoBuffer || !validarBuffer(fotoBuffer)) {
             console.log(`Usando imagen por defecto para artículo ${art.codigo}`);
-            fotoBuffer = imagenPorDefecto;
-            imagenesDefault++;
+            fotoBuffer = imagenPorDefecto; imagenesDefault++;
           } else {
             imagenesExitosas++;
           }
-          
-          // Procesar imagen con Jimp
           const img = await Jimp.read(fotoBuffer);
           img.cover(imagenPx, imagenPx);
           const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-          
-          // Añadir imagen al Excel
           const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
           ws.addImage(imgId, {
             tl: { col: campos.length - 1, row: i + 1 },
             ext: { width: imagenPx, height: imagenPx }
           });
-          
           imagenesInsertadas.add(i);
-          
         } catch (error) {
           console.error(`Error procesando imagen para ${art.codigo}:`, error);
           imagenesConError++;
-          
-          // Como último recurso, usar imagen por defecto
           try {
             const img = await Jimp.read(imagenPorDefecto);
             const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
@@ -476,24 +414,18 @@ async function generarExcelAsync(params, jobId) {
               tl: { col: campos.length - 1, row: i + 1 },
               ext: { width: imagenPx, height: imagenPx }
             });
-            imagenesInsertadas.add(i);
-            imagenesDefault++;
+            imagenesInsertadas.add(i); imagenesDefault++;
           } catch (fallbackError) {
             console.error(`Error crítico con imagen por defecto para ${art.codigo}:`, fallbackError);
           }
         }
-        
         pasos++;
         jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
       })));
-      
-      // Verificar que todas las filas tienen imagen
-      console.log(`Imágenes insertadas: ${imagenesInsertadas.size}/${articulos_base.length}`);
-      
-      // Si faltan imágenes, intentar completarlas
+
+      // Completar imágenes posibles faltantes
       for (let i = 0; i < articulos_base.length; i++) {
         if (!imagenesInsertadas.has(i)) {
-          console.log(`Completando imagen faltante en fila ${i + 2}`);
           try {
             const img = await Jimp.read(imagenPorDefecto);
             const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
@@ -509,12 +441,7 @@ async function generarExcelAsync(params, jobId) {
         }
       }
 
-      // Logging mejorado
-      console.log(`Resumen de imágenes:
-- Exitosas: ${imagenesExitosas}
-- Con error: ${imagenesConError}  
-- Por defecto: ${imagenesDefault}
-- Total: ${articulos_base.length}`);
+      console.log(`Resumen de imágenes:\n- Exitosas: ${imagenesExitosas}\n- Con error: ${imagenesConError}\n- Por defecto: ${imagenesDefault}\n- Total: ${articulos_base.length}`);
     }
 
     jobs[jobId].fase = "Finalizando";
@@ -523,14 +450,11 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].progress = 100;
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
-
-    // Enviar email si se proporcionó
     if (email) {
       jobs[jobId].fase = "Enviando email...";
       await enviarEmailConAdjunto(email, jobs[jobId].buffer, jobs[jobId].filename);
       jobs[jobId].fase = "Email enviado";
     }
-
   } catch (err) {
     jobs[jobId].error = `Error generando Excel: ${err.message}`;
     console.error('Error completo:', err);
@@ -540,6 +464,5 @@ async function generarExcelAsync(params, jobId) {
 }
 
 app.get('/', (req, res) => res.send('Servidor ATOSA backend funcionando.'));
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Escuchando en puerto ${PORT}`));
