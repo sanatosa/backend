@@ -30,12 +30,13 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: true,        // TRUE si Netlify+Render son HTTPS (o false solo para pruebas en localhost)
-    sameSite: 'none',    // 'none' si secure:true, 'lax' si estás en HTTP local
+    secure: true,          // Solo true si ambos sitios están en HTTPS.
+    sameSite: 'none',
     httpOnly: true,
     maxAge: 1000 * 60 * 60 * 2
   }
 }));
+
 
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
