@@ -29,7 +29,7 @@ const filaAltura = 82.0; // ← Altura de fila Excel
 
 const diccionario_traduccion = {
   Español: {
-    codigo: "Código", descripcion: "Descripción", disponible: "Disponible",
+    codigo: "Código", descripcion: "Descripción", disponible: "Stock",
     ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen"
   },
   Inglés: {
@@ -37,11 +37,11 @@ const diccionario_traduccion = {
     ean13: "EAN", precioVenta: "Price", umv: "MOQ", imagen: "Image"
   },
   Francés: {
-    codigo: "Code", descripcion: "Description", disponible: "Disponible",
+    codigo: "Code", descripcion: "Description", disponible: "Stock",
     ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image"
   },
   Italiano: {
-    codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile",
+    codigo: "Codice", descripcion: "Descrizione", disponible: "Stock",
     ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine"
   }
 };
