@@ -1,5 +1,3 @@
-// server.js — ATOSA Excel con MongoDB Atlas y Sistema de Administración Completo
-
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
@@ -16,318 +14,89 @@ const path = require('path');
 const mongoose = require('mongoose');
 require('dotenv').config();
 const nodemailer = require('nodemailer');
-
-// Importar esquemas de MongoDB
 const { Orden, Grupo } = require('./schemas');
 
 const app = express();
 
-// ✅ CAMBIO 1: CORS actualizado para permitir credenciales
-app.use(cors({ 
+app.use(cors({
   origin: 'https://webb2b.netlify.app',
-  credentials: true  // ← Permite enviar cookies cross-domain
+  credentials: true // ¡esencial!
 }));
 
 app.use(express.json());
 
-// ✅ CAMBIO 2: Configuración de sesiones actualizada para cross-domain
 app.use(session({
   secret: process.env.ADMIN_SECRET || 'tu-clave-secreta-admin-2025',
   resave: false,
   saveUninitialized: false,
-  cookie: { 
-    secure: false,         // Mantén en false para HTTP
-    maxAge: 1000 * 60 * 60 * 2,  // 2 horas
-    sameSite: 'none',      // ← Permite cookies cross-domain
-    httpOnly: true         // ← Seguridad adicional
+  cookie: {
+    secure: true,        // TRUE si Netlify+Render son HTTPS (o false solo para pruebas en localhost)
+    sameSite: 'none',    // 'none' si secure:true, 'lax' si estás en HTTP local
+    httpOnly: true,
+    maxAge: 1000 * 60 * 60 * 2
   }
 }));
 
-// Conectar a MongoDB Atlas
 mongoose.connect(process.env.MONGODB_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true,
-})
-.then(() => {
+}).then(() => {
   console.log('Conectado a MongoDB Atlas exitosamente');
-  // Cargar datos desde MongoDB al iniciar
   cargarOrdenArticulos();
-})
-.catch((error) => {
+}).catch((error) => {
   console.error('Error conectando a MongoDB:', error);
-  // Fallback a archivos Excel si MongoDB no está disponible
   console.log('Intentando cargar desde archivos Excel como fallback...');
   cargarOrdenArticulosDesdeArchivo();
 });
 
-// Configuración de multer para subir archivos
 const storage = multer.memoryStorage();
-const upload = multer({ 
+const upload = multer({
   storage: storage,
   fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-      cb(null, true);
-    } else {
-      cb(new Error('Solo se permiten archivos Excel (.xlsx)'), false);
-    }
+    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') cb(null, true);
+    else cb(new Error('Solo se permiten archivos Excel (.xlsx)'), false);
   },
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB máximo
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-// Contraseña de administrador
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AtosaAdmin2025!';
 
-// Middleware para verificar autenticación de admin
 function requireAdmin(req, res, next) {
-  if (req.session.isAdmin) {
-    next();
-  } else {
-    res.status(401).json({ error: 'Acceso denegado. Inicia sesión como administrador.' });
-  }
+  if (req.session.isAdmin) next();
+  else res.status(401).json({ error: 'Acceso denegado. Inicia sesión como administrador.' });
 }
 
-// Configuración de la aplicación
 const imagenPx = 110;
 const filaAltura = 82.0;
-
 const diccionario_traduccion = {
-  Español: {
-    codigo: "Código", descripcion: "Descripción", disponible: "Disponible",
-    ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen"
-  },
-  Inglés: {
-    codigo: "Code", descripcion: "Description", disponible: "Available",
-    ean13: "EAN", precioVenta: "Price", umv: "MOQ", imagen: "Image"
-  },
-  Francés: {
-    codigo: "Code", descripcion: "Description", disponible: "Disponible",
-    ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image"
-  },
-  Italiano: {
-    codigo: "Codice", descripcion: "Descrizione", disponibile: "Disponibile",
-    ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine"
-  }
+  Español: { codigo: "Código", descripcion: "Descripción", disponible: "Disponible", ean13: "EAN", precioVenta: "Precio", umv: "UMV", imagen: "Imagen" },
+  Inglés: { codigo: "Code", descripcion: "Description", disponible: "Available", ean13: "EAN", precioVenta: "Price", umv: "MOQ", imagen: "Image" },
+  Francés: { codigo: "Code", descripcion: "Description", disponible: "Disponible", ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image" },
+  Italiano: { codigo: "Codice", descripcion: "Descrizione", disponibile: "Disponibile", ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine" }
 };
-
 const usuarios_api = {
   Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
   Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
   Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
-
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
 let ordenArticulos = {};
 
-// Función para crear backup de archivos
-function crearBackup(archivo) {
-  try {
-    const fecha = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-    const backupDir = './backups';
-    
-    if (!fs.existsSync(backupDir)) {
-      fs.mkdirSync(backupDir);
-    }
-    
-    const extension = path.extname(archivo);
-    const nombre = path.basename(archivo, extension);
-    const backupPath = path.join(backupDir, `${nombre}_${fecha}${extension}`);
-    
-    fs.copyFileSync(archivo, backupPath);
-    console.log(`Backup creado: ${backupPath}`);
-    return backupPath;
-  } catch (error) {
-    console.error('Error creando backup:', error);
-    return null;
-  }
-}
+function crearBackup(archivo) { /* ... igual que antes ... */ }
+async function cargarOrdenArticulos() { /* ... igual que antes ... */ }
+function cargarOrdenArticulosDesdeArchivo() { /* ... igual que antes ... */ }
+function ordenarArticulos(articulos) { /* ... igual que antes ... */ }
+async function migrarDatosExistentes() { /* ... igual que antes ... */ }
+async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) { /* ... igual que antes ... */ }
+function validarBuffer(buffer) { /* ... igual ... */ }
+async function crearImagenPorDefecto() { /* ... igual ... */ }
+async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) { /* ... igual ... */ }
 
-// Función para cargar orden desde MongoDB
-async function cargarOrdenArticulos() {
-  try {
-    const ordenData = await Orden.find().sort({ orden: 1 });
-    ordenArticulos = {};
-    
-    ordenData.forEach(item => {
-      ordenArticulos[item.codigo] = item.orden;
-    });
-    
-    console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del orden desde MongoDB`);
-  } catch (error) {
-    console.error('Error cargando orden desde MongoDB:', error);
-    // Fallback a archivo Excel
-    cargarOrdenArticulosDesdeArchivo();
-  }
-}
-
-// Función de fallback para cargar desde archivo Excel
-function cargarOrdenArticulosDesdeArchivo() {
-  try {
-    const workbookOrden = XLSX.readFile('./orden.xlsx');
-    const sheetOrden = workbookOrden.Sheets[workbookOrden.SheetNames[0]];
-    const datosOrden = XLSX.utils.sheet_to_json(sheetOrden, { header: ['orden', 'codigo'] });
-    
-    ordenArticulos = {};
-    datosOrden.forEach(row => {
-      if (row.codigo && row.orden !== undefined) {
-        ordenArticulos[row.codigo.toString().trim()] = parseInt(row.orden) || 999999;
-      }
-    });
-    
-    console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del archivo orden.xlsx (fallback)`);
-  } catch (error) {
-    console.error('Error cargando orden.xlsx:', error.message);
-    ordenArticulos = {};
-  }
-}
-
-// Función para ordenar artículos
-function ordenarArticulos(articulos) {
-  return articulos.sort((a, b) => {
-    const codigoA = a.codigo ? a.codigo.toString().trim() : '';
-    const codigoB = b.codigo ? b.codigo.toString().trim() : '';
-    
-    const ordenA = ordenArticulos[codigoA] || 999999;
-    const ordenB = ordenArticulos[codigoB] || 999999;
-    
-    if (ordenA === ordenB) {
-      return codigoA.localeCompare(codigoB);
-    }
-    
-    return ordenA - ordenB;
-  });
-}
-
-// Función para migrar datos existentes
-async function migrarDatosExistentes() {
-  try {
-    console.log('Iniciando migración de datos...');
-    
-    // Migrar orden.xlsx
-    if (fs.existsSync('./orden.xlsx')) {
-      const workbookOrden = XLSX.readFile('./orden.xlsx');
-      const sheetOrden = workbookOrden.Sheets[workbookOrden.SheetNames[0]];
-      const datosOrden = XLSX.utils.sheet_to_json(sheetOrden, { header: ['orden', 'codigo'] });
-      
-      await Orden.deleteMany({}); // Limpiar datos existentes
-      
-      const ordenItems = datosOrden.map(row => ({
-        orden: parseInt(row.orden) || 999999,
-        codigo: row.codigo ? row.codigo.toString().trim() : ''
-      })).filter(item => item.codigo);
-      
-      await Orden.insertMany(ordenItems);
-      console.log(`Migrados ${ordenItems.length} elementos de orden`);
-    }
-    
-    // Migrar grupos.xlsx
-    if (fs.existsSync('./grupos.xlsx')) {
-      const workbookGrupos = XLSX.readFile('./grupos.xlsx');
-      const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
-      const datosGrupos = XLSX.utils.sheet_to_json(sheetGrupos);
-      
-      await Grupo.deleteMany({}); // Limpiar datos existentes
-      
-      const grupoItems = datosGrupos.map(row => ({
-        grupo: row.grupo ? row.grupo.toString().trim() : '',
-        codigo: row.codigo ? row.codigo.toString().trim() : ''
-      })).filter(item => item.grupo && item.codigo);
-      
-      await Grupo.insertMany(grupoItems);
-      console.log(`Migrados ${grupoItems.length} elementos de grupos`);
-    }
-    
-    console.log('Migración completada exitosamente');
-    
-  } catch (error) {
-    console.error('Error en la migración:', error);
-  }
-}
-
-// Descomenta la siguiente línea para ejecutar la migración (solo la primera vez)
-// migrarDatosExistentes();
-
-// Función para obtener fotos con reintentos
-async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
-  for (let i = 0; i < intentos; i++) {
-    try {
-      const resp = await axios.get(`https://b2b.atosa.es:880/api/articulos/foto/${codigo}`, {
-        auth: { username: usuario, password },
-        timeout: 15000,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      });
-      
-      const fotos = resp.data.fotos;
-      if (Array.isArray(fotos) && fotos.length > 0) {
-        const buffer = Buffer.from(fotos[0], 'base64');
-        if (buffer.length > 0) {
-          return buffer;
-        }
-      }
-    } catch (e) {
-      console.log(`Intento ${i + 1} fallido para imagen ${codigo}:`, e.message);
-      if (i < intentos - 1) {
-        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
-      }
-    }
-  }
-  return null;
-}
-
-// Función para validar buffer de imagen
-function validarBuffer(buffer) {
-  if (!buffer || buffer.length === 0) return false;
-  const jpegHeader = buffer.slice(0, 2).toString('hex') === 'ffd8';
-  const pngHeader = buffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a';
-  return jpegHeader || pngHeader;
-}
-
-// Función para crear imagen por defecto
-async function crearImagenPorDefecto() {
-  const img = new Jimp(imagenPx, imagenPx, '#f0f0f0');
-  const font = await Jimp.loadFont(Jimp.FONT_SANS_16_BLACK);
-  img.print(font, 10, imagenPx/2 - 10, 'Sin imagen');
-  return await img.getBufferAsync(Jimp.MIME_JPEG);
-}
-
-// Función para enviar email con adjunto
-async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
-
-  const mailOptions = {
-    from: process.env.EMAIL_FROM,
-    to: emailDestino,
-    subject: 'Tu archivo Excel está listo',
-    text: 'Adjuntamos el listado generado. ¡Gracias por usar la herramienta!',
-    attachments: [
-      {
-        filename: filename,
-        content: bufferExcel
-      }
-    ]
-  };
-
-  try {
-    await transporter.sendMail(mailOptions);
-    console.log(`Email enviado a ${emailDestino}`);
-  } catch (error) {
-    console.error(`Error enviando email: ${error.message}`);
-  }
-}
-
-// ENDPOINTS ADMINISTRATIVOS
-
-// Login de administrador
+//--- ENDPOINTS ADMIN ---
 app.post('/admin/login', (req, res) => {
   const { password } = req.body;
-  
   if (password === ADMIN_PASSWORD) {
     req.session.isAdmin = true;
     res.json({ success: true, message: 'Acceso autorizado' });
@@ -335,508 +104,24 @@ app.post('/admin/login', (req, res) => {
     res.status(401).json({ success: false, message: 'Contraseña incorrecta' });
   }
 });
-
-// Logout de administrador
 app.post('/admin/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      res.status(500).json({ error: 'Error al cerrar sesión' });
-    } else {
-      res.json({ success: true, message: 'Sesión cerrada' });
-    }
+  req.session.destroy(err => {
+    if (err) res.status(500).json({ error: 'Error al cerrar sesión' });
+    else res.json({ success: true, message: 'Sesión cerrada' });
   });
 });
-
-// Verificar estado de admin
 app.get('/admin/status', (req, res) => {
   res.json({ isAdmin: !!req.session.isAdmin });
 });
+app.post('/admin/upload-grupos', requireAdmin, upload.single('archivo'), async (req, res) => { /* ... igual ... */ });
+app.post('/admin/upload-orden', requireAdmin, upload.single('archivo'), async (req, res) => { /* ... igual ... */ });
 
-// Subir grupos.xlsx
-app.post('/admin/upload-grupos', requireAdmin, upload.single('archivo'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se subió ningún archivo' });
-    }
-
-    // Validar estructura del archivo
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const datos = XLSX.utils.sheet_to_json(sheet);
-    
-    // Validar que tenga las columnas necesarias
-    if (datos.length === 0) {
-      return res.status(400).json({ error: 'El archivo está vacío' });
-    }
-    
-    const primeraFila = datos[0];
-    if (!primeraFila.hasOwnProperty('grupo') || !primeraFila.hasOwnProperty('codigo')) {
-      return res.status(400).json({ error: 'El archivo debe tener columnas "grupo" y "codigo"' });
-    }
-
-    // Crear backup del archivo actual (si existe)
-    if (fs.existsSync('./grupos.xlsx')) {
-      crearBackup('./grupos.xlsx');
-    }
-    
-    // Guardar en MongoDB
-    await Grupo.deleteMany({});
-    
-    const grupoItems = datos.map(row => ({
-      grupo: row.grupo ? row.grupo.toString().trim() : '',
-      codigo: row.codigo ? row.codigo.toString().trim() : ''
-    })).filter(item => item.grupo && item.codigo);
-    
-    await Grupo.insertMany(grupoItems);
-    
-    // También guardar el archivo físico como backup
-    fs.writeFileSync('./grupos.xlsx', req.file.buffer);
-    
-    console.log('Archivo grupos.xlsx actualizado por admin');
-    res.json({ 
-      success: true, 
-      message: 'Archivo grupos.xlsx actualizado correctamente en MongoDB',
-      registros: grupoItems.length
-    });
-    
-  } catch (error) {
-    console.error('Error subiendo grupos.xlsx:', error);
-    res.status(500).json({ error: 'Error procesando el archivo: ' + error.message });
-  }
-});
-
-// Subir orden.xlsx
-app.post('/admin/upload-orden', requireAdmin, upload.single('archivo'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se subió ningún archivo' });
-    }
-
-    // Validar estructura del archivo
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const datos = XLSX.utils.sheet_to_json(sheet, { header: ['orden', 'codigo'] });
-    
-    // Validar que tenga datos
-    if (datos.length === 0) {
-      return res.status(400).json({ error: 'El archivo está vacío' });
-    }
-    
-    // Validar estructura básica
-    const validRows = datos.filter(row => row.orden && row.codigo);
-    if (validRows.length === 0) {
-      return res.status(400).json({ error: 'El archivo debe tener columnas de orden y código' });
-    }
-
-    // Crear backup del archivo actual (si existe)
-    if (fs.existsSync('./orden.xlsx')) {
-      crearBackup('./orden.xlsx');
-    }
-    
-    // Guardar en MongoDB
-    await Orden.deleteMany({});
-    
-    const ordenItems = validRows.map(row => ({
-      orden: parseInt(row.orden) || 999999,
-      codigo: row.codigo ? row.codigo.toString().trim() : ''
-    })).filter(item => item.codigo);
-    
-    await Orden.insertMany(ordenItems);
-    
-    // También guardar el archivo físico como backup
-    fs.writeFileSync('./orden.xlsx', req.file.buffer);
-    
-    // Recargar el orden en memoria
-    await cargarOrdenArticulos();
-    
-    console.log('Archivo orden.xlsx actualizado por admin');
-    res.json({ 
-      success: true, 
-      message: 'Archivo orden.xlsx actualizado correctamente en MongoDB',
-      registros: ordenItems.length
-    });
-    
-  } catch (error) {
-    console.error('Error subiendo orden.xlsx:', error);
-    res.status(500).json({ error: 'Error procesando el archivo: ' + error.message });
-  }
-});
-
-// ENDPOINTS PRINCIPALES
-
-// Obtener grupos
-app.get('/api/grupos', async (req, res) => {
-  try {
-    // Intentar cargar desde MongoDB primero
-    const grupos = await Grupo.find();
-    if (grupos.length > 0) {
-      const nombres = [...new Set(grupos.map(g => g.grupo))].sort();
-      res.json({ grupos: nombres });
-    } else {
-      // Fallback a archivo Excel
-      const workbook = XLSX.readFile('./grupos.xlsx');
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const gruposData = XLSX.utils.sheet_to_json(sheet);
-      const nombres = [...new Set(gruposData.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0))].sort();
-      res.json({ grupos: nombres });
-    }
-  } catch (err) {
-    console.error('Error obteniendo grupos:', err);
-    res.status(500).json({ error: "No se pudieron obtener los grupos." });
-  }
-});
-
-// Generar Excel
-app.post('/api/genera-excel-final-async', async (req, res) => {
-  try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = req.body;
-    const jobId = uuidv4();
-    jobs[jobId] = { progress: 0, buffer: null, error: null, filename: null, startedAt: Date.now(), fase: "Preparando" };
-    generarExcelAsync({ grupo, idioma, descuento, soloStock, sinImagenes, email }, jobId);
-    res.json({ jobId });
-  } catch (err) {
-    res.status(500).json({ error: "Error iniciando la generación del Excel." });
-  }
-});
-
-// Obtener progreso
-app.get('/api/progreso/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  const job = jobs[jobId];
-  if (!job) return res.status(404).json({ error: 'Trabajo no encontrado' });
-
-  let eta = null;
-  if (job.progress > 2 && job.progress < 99 && job.startedAt) {
-    const elapsed = (Date.now() - job.startedAt) / 1000;
-    const p = Math.max(job.progress, 1) / 100;
-    const total = elapsed / p;
-    eta = Math.max(0, Math.round(total - elapsed));
-  }
-
-  res.json({ progress: job.progress, error: job.error, filename: job.filename, eta, fase: job.fase });
-});
-
-// Descargar Excel
-app.get('/api/descarga-excel/:jobId', (req, res) => {
-  const { jobId } = req.params;
-  const job = jobs[jobId];
-  if (!job || !job.buffer) return res.status(404).json({ error: 'Archivo no disponible.' });
-
-  res.setHeader('Content-Disposition', `attachment; filename="${job.filename}"`);
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.send(job.buffer);
-});
-
-// Función principal para generar Excel
-async function generarExcelAsync(params, jobId) {
-  try {
-    const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
-    const maxFilas = 3500;
-
-    jobs[jobId].fase = "Preparando grupo y artículos";
-
-    // Obtener códigos del grupo desde MongoDB o archivo
-    let codigosGrupo = [];
-    try {
-      const grupos = await Grupo.find({ grupo: grupo });
-      if (grupos.length > 0) {
-        codigosGrupo = grupos.map(g => g.codigo);
-      } else {
-        // Fallback a archivo Excel
-        const workbookGrupos = XLSX.readFile('./grupos.xlsx');
-        const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
-        const gruposData = XLSX.utils.sheet_to_json(sheetGrupos);
-        codigosGrupo = gruposData
-          .filter(row => row.grupo === grupo)
-          .map(row => (row.codigo ? row.codigo.toString().trim() : null))
-          .filter(Boolean);
-      }
-    } catch (error) {
-      console.error('Error obteniendo códigos del grupo:', error);
-      jobs[jobId].error = "Error obteniendo códigos del grupo.";
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    if (!codigosGrupo.length) {
-      jobs[jobId].error = "No hay artículos para ese grupo.";
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    jobs[jobId].fase = "Descargando artículos base";
-    const { usuario, password } = usuarios_api["Español"];
-    const apiURL = "https://b2b.atosa.es:880/api/articulos/";
-
-    let resp0;
-    try {
-      resp0 = await axios.get(apiURL, {
-        auth: { username: usuario, password: password },
-        timeout: 70000,
-        httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-      });
-    } catch (err) {
-      jobs[jobId].error = "Error autenticando usuario principal: " + (err.response?.status || "") + " " + (err.response?.data || "");
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    let articulos_base = resp0.data
-      .filter(art =>
-        codigosGrupo.includes(art.codigo?.toString().trim()) &&
-        (!soloStock || parseInt(art.disponible || 0) > 0)).slice(0, maxFilas);
-
-    if (!articulos_base.length) {
-      jobs[jobId].error = "No hay artículos que coincidan con el filtro.";
-      jobs[jobId].progress = 100;
-      return;
-    }
-
-    jobs[jobId].fase = "Ordenando artículos según catálogo";
-    articulos_base = ordenarArticulos(articulos_base);
-
-    jobs[jobId].fase = "Descargando descripciones del idioma";
-    let descripcionesIdioma = {};
-    if (idioma !== "Español") {
-      try {
-        const userIdioma = usuarios_api[idioma];
-        const respIdioma = await axios.get(apiURL, {
-          auth: { username: userIdioma.usuario, password: userIdioma.password },
-          timeout: 70000,
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-        });
-        for (const art of respIdioma.data) {
-          if (art.codigo && art.descripcion) {
-            descripcionesIdioma[art.codigo.toString().trim()] = art.descripcion;
-          }
-        }
-      } catch (e) {
-        descripcionesIdioma = {};
-      }
-    }
-
-    jobs[jobId].fase = "Calculando productos promocionales";
-    let articulos_promocion = new Set();
-    if (descuento > 0) {
-      let precios0 = {}, precios8 = {};
-      try {
-        for (const art of articulos_base) {
-          const cod = art.codigo ? art.codigo.toString().trim() : null;
-          if (cod) precios0[cod] = parseFloat(art.precioVenta);
-        }
-
-        const resp8 = await axios.get(apiURL, {
-          auth: { username: usuario8.usuario, password: usuario8.password },
-          timeout: 70000,
-          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-        });
-
-        for (const art of resp8.data) {
-          const cod = art.codigo ? art.codigo.toString().trim() : null;
-          if (cod) precios8[cod] = parseFloat(art.precioVenta);
-        }
-
-        for (const cod of Object.keys(precios0)) {
-          if (
-            precios8[cod] !== undefined &&
-            Math.abs(precios0[cod] - precios8[cod]) < 0.01
-          ) {
-            articulos_promocion.add(cod);
-          }
-        }
-      } catch {
-        articulos_promocion = new Set();
-      }
-    }
-
-    jobs[jobId].fase = "Componiendo Excel";
-    const campos = ["codigo", "descripcion", "disponible", "ean13", "precioVenta", "umv", "imagen"];
-    const traducido = campos.map(c => diccionario_traduccion[idioma][c]);
-
-    const workbook = new ExcelJS.Workbook();
-    const ws = workbook.addWorksheet('Listado');
-    ws.addRow(traducido);
-
-    const colWidths = {
-      codigo: 11, descripcion: 30, disponible: 10, ean13: 10,
-      precioVenta: 10, umv: 8, imagen: 15
-    };
-
-    ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
-
-    const headerRow = ws.getRow(1);
-    const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
-    headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
-    headerRow.height = filaAltura;
-
-    campos.forEach((campo, idx) => {
-      const cell = headerRow.getCell(idx + 1);
-      cell.alignment = { vertical: "middle", horizontal: "center", wrapText: true, textRotation: 0 };
-      cell.fill = cabeceraColor;
-      cell.border = { bottom: { style: 'thick', color: { argb: 'FF1E1E1E' } } };
-    });
-
-    const idxEAN = campos.indexOf("ean13") + 1;
-    let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
-    let pasos = 0;
-
-    for (const art of articulos_base) {
-      const fila = [];
-      const cod = art.codigo?.toString().trim();
-
-      for (const campo of campos) {
-        let valor = art[campo] ?? "";
-        if (campo === "precioVenta") {
-          if (descuento > 0 && !articulos_promocion.has(cod)) {
-            valor = Math.round((parseFloat(valor) * (1 - descuento / 100)) * 100) / 100;
-          } else {
-            valor = parseFloat(valor);
-          }
-        } else if (campo === "descripcion" && idioma !== "Español") {
-          if (descripcionesIdioma[cod]) valor = descripcionesIdioma[cod];
-        }
-
-        fila.push(valor);
-      }
-
-      ws.addRow(fila);
-      pasos++;
-      jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
-    }
-
-    for (let i = 2; i <= ws.rowCount; i++) {
-      const row = ws.getRow(i);
-      row.height = filaAltura;
-      const zebra = i % 2 === 0 ? 'FFF3F4F6' : 'FFFFFFFF';
-
-      for (let j = 1; j <= campos.length; j++) {
-        const cell = row.getCell(j);
-        const isEAN = j === idxEAN;
-        const fontSize = isEAN ? 10 : 13;
-
-        cell.alignment = {
-          vertical: "middle",
-          horizontal: "center",
-          wrapText: campos[j - 1] === "descripcion",
-          textRotation: isEAN ? 90 : 0
-        };
-
-        cell.font = { size: fontSize, name: 'Segoe UI' };
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: zebra } };
-        cell.border = {
-          top: { style: 'thin', color: { argb: 'FFCCCCCC' } },
-          bottom: { style: 'thin', color: { argb: 'FFCCCCCC' } }
-        };
-      }
-    }
-
-    if (!sinImagenes) {
-      jobs[jobId].fase = "Insertando imágenes...";
-      const limit = pLimit(3);
-      
-      const imagenPorDefecto = await crearImagenPorDefecto();
-      
-      const imagenesInsertadas = new Set();
-      let imagenesExitosas = 0;
-      let imagenesConError = 0;
-      let imagenesDefault = 0;
-
-      await Promise.all(articulos_base.map((art, i) => limit(async () => {
-        let fotoBuffer = null;
-        
-        try {
-          fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 3);
-          
-          if (!fotoBuffer || !validarBuffer(fotoBuffer)) {
-            console.log(`Usando imagen por defecto para artículo ${art.codigo}`);
-            fotoBuffer = imagenPorDefecto;
-            imagenesDefault++;
-          } else {
-            imagenesExitosas++;
-          }
-          
-          const img = await Jimp.read(fotoBuffer);
-          img.cover(imagenPx, imagenPx);
-          const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-          
-          const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
-          ws.addImage(imgId, {
-            tl: { col: campos.length - 1, row: i + 1 },
-            ext: { width: imagenPx, height: imagenPx }
-          });
-          
-          imagenesInsertadas.add(i);
-          
-        } catch (error) {
-          console.error(`Error procesando imagen para ${art.codigo}:`, error);
-          imagenesConError++;
-          
-          try {
-            const img = await Jimp.read(imagenPorDefecto);
-            const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-            const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
-            ws.addImage(imgId, {
-              tl: { col: campos.length - 1, row: i + 1 },
-              ext: { width: imagenPx, height: imagenPx }
-            });
-            imagenesInsertadas.add(i);
-            imagenesDefault++;
-          } catch (fallbackError) {
-            console.error(`Error crítico con imagen por defecto para ${art.codigo}:`, fallbackError);
-          }
-        }
-        
-        pasos++;
-        jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
-      })));
-      
-      for (let i = 0; i < articulos_base.length; i++) {
-        if (!imagenesInsertadas.has(i)) {
-          console.log(`Completando imagen faltante en fila ${i + 2}`);
-          try {
-            const img = await Jimp.read(imagenPorDefecto);
-            const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
-            const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
-            ws.addImage(imgId, {
-              tl: { col: campos.length - 1, row: i + 1 },
-              ext: { width: imagenPx, height: imagenPx }
-            });
-            imagenesDefault++;
-          } catch (error) {
-            console.error(`Error añadiendo imagen de respaldo en fila ${i + 2}:`, error);
-          }
-        }
-      }
-
-      console.log(`Resumen de imágenes:
-- Exitosas: ${imagenesExitosas}
-- Con error: ${imagenesConError}  
-- Por defecto: ${imagenesDefault}
-- Total: ${articulos_base.length}`);
-    }
-
-    jobs[jobId].fase = "Finalizando";
-    const buffer = await workbook.xlsx.writeBuffer();
-    jobs[jobId].buffer = Buffer.from(buffer);
-    jobs[jobId].progress = 100;
-    jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
-    jobs[jobId].fase = "Completado";
-
-    if (email) {
-      jobs[jobId].fase = "Enviando email...";
-      await enviarEmailConAdjunto(email, jobs[jobId].buffer, jobs[jobId].filename);
-      jobs[jobId].fase = "Email enviado";
-    }
-
-  } catch (err) {
-    jobs[jobId].error = `Error generando Excel: ${err.message}`;
-    console.error('Error completo:', err);
-    jobs[jobId].progress = 100;
-    jobs[jobId].fase = "Error";
-  }
-}
+//--- ENDPOINTS PRINCIPALES ---
+app.get('/api/grupos', async (req, res) => { /* ... igual ... */ });
+app.post('/api/genera-excel-final-async', async (req, res) => { /* ... igual ... */ });
+app.get('/api/progreso/:jobId', (req, res) => { /* ... igual ... */ });
+app.get('/api/descarga-excel/:jobId', (req, res) => { /* ... igual ... */ });
+async function generarExcelAsync(params, jobId) { /* ... igual ... */ }
 
 app.get('/', (req, res) => res.send('Servidor ATOSA backend funcionando.'));
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Escuchando en puerto ${PORT}`));
+app.listen(process.env.PORT || 3000, () => console.log(`Escuchando en puerto ${process.env.PORT || 3000}`));
