@@ -12,9 +12,13 @@ const pLimit = require('p-limit').default;
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 
-const app = express();
-app.use(cors({ origin: 'https://webb2b.netlify.app' }));
-app.use(express.json());
+app.use(cors({
+  origin: 'https://webb2b.netlify.app',
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS']
+}));
+app.options('*', cors());
+
 
 // --- Cambia solo aquí el alto de la fila ---
 const imagenPx = 110;
