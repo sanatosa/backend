@@ -1,4 +1,4 @@
-// server.js — ATOSA Excel con MongoDB Atlas y Sistema de Administración Completo
+// server.js — ATOSA Excel: cabecera morada, datos EAN font 10, imágenes encajadas, alto de fila 82.0 puntos Excel
 
 const express = require('express');
 const axios = require('axios');
@@ -9,86 +9,16 @@ const https = require('https');
 const { v4: uuidv4 } = require('uuid');
 const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
-const multer = require('multer');
-const session = require('express-session');
-const fs = require('fs');
-const path = require('path');
-const mongoose = require('mongoose');
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 
-// Importar esquemas de MongoDB
-const { Orden, Grupo } = require('./schemas');
-
 const app = express();
-
-// ✅ CAMBIO 1: CORS actualizado para permitir credenciales
-app.use(cors({ 
-  origin: 'https://webb2b.netlify.app',
-  credentials: true  // ← Permite enviar cookies cross-domain
-}));
-
+app.use(cors({ origin: 'https://webb2b.netlify.app' }));
 app.use(express.json());
 
-// ✅ CAMBIO 2: Configuración de sesiones actualizada para cross-domain
-app.use(session({
-  secret: process.env.ADMIN_SECRET || 'tu-clave-secreta-admin-2025',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { 
-    secure: false,         // Mantén en false para HTTP
-    maxAge: 1000 * 60 * 60 * 2,  // 2 horas
-    sameSite: 'none',      // ← Permite cookies cross-domain
-    httpOnly: true         // ← Seguridad adicional
-  }
-}));
-
-// Conectar a MongoDB Atlas
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => {
-  console.log('Conectado a MongoDB Atlas exitosamente');
-  // Cargar datos desde MongoDB al iniciar
-  cargarOrdenArticulos();
-})
-.catch((error) => {
-  console.error('Error conectando a MongoDB:', error);
-  // Fallback a archivos Excel si MongoDB no está disponible
-  console.log('Intentando cargar desde archivos Excel como fallback...');
-  cargarOrdenArticulosDesdeArchivo();
-});
-
-// Configuración de multer para subir archivos
-const storage = multer.memoryStorage();
-const upload = multer({ 
-  storage: storage,
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
-      cb(null, true);
-    } else {
-      cb(new Error('Solo se permiten archivos Excel (.xlsx)'), false);
-    }
-  },
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB máximo
-});
-
-// Contraseña de administrador
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'AtosaAdmin2025!';
-
-// Middleware para verificar autenticación de admin
-function requireAdmin(req, res, next) {
-  if (req.session.isAdmin) {
-    next();
-  } else {
-    res.status(401).json({ error: 'Acceso denegado. Inicia sesión como administrador.' });
-  }
-}
-
-// Configuración de la aplicación
+// --- Cambia solo aquí el alto de la fila ---
 const imagenPx = 110;
-const filaAltura = 82.0;
+const filaAltura = 82.0; // ← Altura de fila en puntos Excel, según tu requerimiento
 
 const diccionario_traduccion = {
   Español: {
@@ -104,7 +34,7 @@ const diccionario_traduccion = {
     ean13: "EAN", precioVenta: "Prix", umv: "MOQ", imagen: "Image"
   },
   Italiano: {
-    codigo: "Codice", descripcion: "Descrizione", disponibile: "Disponibile",
+    codigo: "Codice", descripcion: "Descrizione", disponible: "Disponibile",
     ean13: "EAN", precioVenta: "Prezzo", umv: "MOQ", imagen: "Immagine"
   }
 };
@@ -118,56 +48,17 @@ const usuarios_api = {
 
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
+
+// NUEVA FUNCIONALIDAD: Cargar orden de artículos
 let ordenArticulos = {};
 
-// Función para crear backup de archivos
-function crearBackup(archivo) {
-  try {
-    const fecha = new Date().toISOString().slice(0, 19).replace(/:/g, '-');
-    const backupDir = './backups';
-    
-    if (!fs.existsSync(backupDir)) {
-      fs.mkdirSync(backupDir);
-    }
-    
-    const extension = path.extname(archivo);
-    const nombre = path.basename(archivo, extension);
-    const backupPath = path.join(backupDir, `${nombre}_${fecha}${extension}`);
-    
-    fs.copyFileSync(archivo, backupPath);
-    console.log(`Backup creado: ${backupPath}`);
-    return backupPath;
-  } catch (error) {
-    console.error('Error creando backup:', error);
-    return null;
-  }
-}
-
-// Función para cargar orden desde MongoDB
-async function cargarOrdenArticulos() {
-  try {
-    const ordenData = await Orden.find().sort({ orden: 1 });
-    ordenArticulos = {};
-    
-    ordenData.forEach(item => {
-      ordenArticulos[item.codigo] = item.orden;
-    });
-    
-    console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del orden desde MongoDB`);
-  } catch (error) {
-    console.error('Error cargando orden desde MongoDB:', error);
-    // Fallback a archivo Excel
-    cargarOrdenArticulosDesdeArchivo();
-  }
-}
-
-// Función de fallback para cargar desde archivo Excel
-function cargarOrdenArticulosDesdeArchivo() {
+function cargarOrdenArticulos() {
   try {
     const workbookOrden = XLSX.readFile('./orden.xlsx');
     const sheetOrden = workbookOrden.Sheets[workbookOrden.SheetNames[0]];
     const datosOrden = XLSX.utils.sheet_to_json(sheetOrden, { header: ['orden', 'codigo'] });
     
+    // Crear un mapa de código -> orden
     ordenArticulos = {};
     datosOrden.forEach(row => {
       if (row.codigo && row.orden !== undefined) {
@@ -175,22 +66,23 @@ function cargarOrdenArticulosDesdeArchivo() {
       }
     });
     
-    console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del archivo orden.xlsx (fallback)`);
+    console.log(`Cargados ${Object.keys(ordenArticulos).length} artículos del archivo orden.xlsx`);
   } catch (error) {
     console.error('Error cargando orden.xlsx:', error.message);
-    ordenArticulos = {};
+    ordenArticulos = {}; // Si no se puede cargar, usar objeto vacío
   }
 }
 
-// Función para ordenar artículos
+// NUEVA FUNCIONALIDAD: Función para ordenar artículos según orden.xlsx
 function ordenarArticulos(articulos) {
   return articulos.sort((a, b) => {
     const codigoA = a.codigo ? a.codigo.toString().trim() : '';
     const codigoB = b.codigo ? b.codigo.toString().trim() : '';
     
-    const ordenA = ordenArticulos[codigoA] || 999999;
-    const ordenB = ordenArticulos[codigoB] || 999999;
+    const ordenA = ordenArticulos[codigoA] || 999999; // Si no existe, va al final
+    const ordenB = ordenArticulos[codigoB] || 999999; // Si no existe, va al final
     
+    // Si ambos tienen el mismo orden (999999 = no encontrados), ordenar por código
     if (ordenA === ordenB) {
       return codigoA.localeCompare(codigoB);
     }
@@ -199,68 +91,24 @@ function ordenarArticulos(articulos) {
   });
 }
 
-// Función para migrar datos existentes
-async function migrarDatosExistentes() {
-  try {
-    console.log('Iniciando migración de datos...');
-    
-    // Migrar orden.xlsx
-    if (fs.existsSync('./orden.xlsx')) {
-      const workbookOrden = XLSX.readFile('./orden.xlsx');
-      const sheetOrden = workbookOrden.Sheets[workbookOrden.SheetNames[0]];
-      const datosOrden = XLSX.utils.sheet_to_json(sheetOrden, { header: ['orden', 'codigo'] });
-      
-      await Orden.deleteMany({}); // Limpiar datos existentes
-      
-      const ordenItems = datosOrden.map(row => ({
-        orden: parseInt(row.orden) || 999999,
-        codigo: row.codigo ? row.codigo.toString().trim() : ''
-      })).filter(item => item.codigo);
-      
-      await Orden.insertMany(ordenItems);
-      console.log(`Migrados ${ordenItems.length} elementos de orden`);
-    }
-    
-    // Migrar grupos.xlsx
-    if (fs.existsSync('./grupos.xlsx')) {
-      const workbookGrupos = XLSX.readFile('./grupos.xlsx');
-      const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
-      const datosGrupos = XLSX.utils.sheet_to_json(sheetGrupos);
-      
-      await Grupo.deleteMany({}); // Limpiar datos existentes
-      
-      const grupoItems = datosGrupos.map(row => ({
-        grupo: row.grupo ? row.grupo.toString().trim() : '',
-        codigo: row.codigo ? row.codigo.toString().trim() : ''
-      })).filter(item => item.grupo && item.codigo);
-      
-      await Grupo.insertMany(grupoItems);
-      console.log(`Migrados ${grupoItems.length} elementos de grupos`);
-    }
-    
-    console.log('Migración completada exitosamente');
-    
-  } catch (error) {
-    console.error('Error en la migración:', error);
-  }
-}
+// Cargar el orden al iniciar el servidor
+cargarOrdenArticulos();
 
-// Descomenta la siguiente línea para ejecutar la migración (solo la primera vez)
-// migrarDatosExistentes();
-
-// Función para obtener fotos con reintentos
+// Función mejorada para obtener fotos con reintentos
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
   for (let i = 0; i < intentos; i++) {
     try {
       const resp = await axios.get(`https://b2b.atosa.es:880/api/articulos/foto/${codigo}`, {
         auth: { username: usuario, password },
-        timeout: 15000,
+        timeout: 15000, // Aumentar timeout
         httpsAgent: new https.Agent({ rejectUnauthorized: false }),
       });
       
       const fotos = resp.data.fotos;
       if (Array.isArray(fotos) && fotos.length > 0) {
         const buffer = Buffer.from(fotos[0], 'base64');
+        
+        // Verificar que el buffer sea válido
         if (buffer.length > 0) {
           return buffer;
         }
@@ -268,7 +116,7 @@ async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
     } catch (e) {
       console.log(`Intento ${i + 1} fallido para imagen ${codigo}:`, e.message);
       if (i < intentos - 1) {
-        await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+        await new Promise(r => setTimeout(r, 1000 * (i + 1))); // Delay incremental
       }
     }
   }
@@ -278,8 +126,11 @@ async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
 // Función para validar buffer de imagen
 function validarBuffer(buffer) {
   if (!buffer || buffer.length === 0) return false;
+  
+  // Verificar headers de imagen comunes
   const jpegHeader = buffer.slice(0, 2).toString('hex') === 'ffd8';
   const pngHeader = buffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a';
+  
   return jpegHeader || pngHeader;
 }
 
@@ -322,171 +173,18 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   }
 }
 
-// ENDPOINTS ADMINISTRATIVOS
-
-// Login de administrador
-app.post('/admin/login', (req, res) => {
-  const { password } = req.body;
-  
-  if (password === ADMIN_PASSWORD) {
-    req.session.isAdmin = true;
-    res.json({ success: true, message: 'Acceso autorizado' });
-  } else {
-    res.status(401).json({ success: false, message: 'Contraseña incorrecta' });
-  }
-});
-
-// Logout de administrador
-app.post('/admin/logout', (req, res) => {
-  req.session.destroy((err) => {
-    if (err) {
-      res.status(500).json({ error: 'Error al cerrar sesión' });
-    } else {
-      res.json({ success: true, message: 'Sesión cerrada' });
-    }
-  });
-});
-
-// Verificar estado de admin
-app.get('/admin/status', (req, res) => {
-  res.json({ isAdmin: !!req.session.isAdmin });
-});
-
-// Subir grupos.xlsx
-app.post('/admin/upload-grupos', requireAdmin, upload.single('archivo'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se subió ningún archivo' });
-    }
-
-    // Validar estructura del archivo
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const datos = XLSX.utils.sheet_to_json(sheet);
-    
-    // Validar que tenga las columnas necesarias
-    if (datos.length === 0) {
-      return res.status(400).json({ error: 'El archivo está vacío' });
-    }
-    
-    const primeraFila = datos[0];
-    if (!primeraFila.hasOwnProperty('grupo') || !primeraFila.hasOwnProperty('codigo')) {
-      return res.status(400).json({ error: 'El archivo debe tener columnas "grupo" y "codigo"' });
-    }
-
-    // Crear backup del archivo actual (si existe)
-    if (fs.existsSync('./grupos.xlsx')) {
-      crearBackup('./grupos.xlsx');
-    }
-    
-    // Guardar en MongoDB
-    await Grupo.deleteMany({});
-    
-    const grupoItems = datos.map(row => ({
-      grupo: row.grupo ? row.grupo.toString().trim() : '',
-      codigo: row.codigo ? row.codigo.toString().trim() : ''
-    })).filter(item => item.grupo && item.codigo);
-    
-    await Grupo.insertMany(grupoItems);
-    
-    // También guardar el archivo físico como backup
-    fs.writeFileSync('./grupos.xlsx', req.file.buffer);
-    
-    console.log('Archivo grupos.xlsx actualizado por admin');
-    res.json({ 
-      success: true, 
-      message: 'Archivo grupos.xlsx actualizado correctamente en MongoDB',
-      registros: grupoItems.length
-    });
-    
-  } catch (error) {
-    console.error('Error subiendo grupos.xlsx:', error);
-    res.status(500).json({ error: 'Error procesando el archivo: ' + error.message });
-  }
-});
-
-// Subir orden.xlsx
-app.post('/admin/upload-orden', requireAdmin, upload.single('archivo'), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No se subió ningún archivo' });
-    }
-
-    // Validar estructura del archivo
-    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const datos = XLSX.utils.sheet_to_json(sheet, { header: ['orden', 'codigo'] });
-    
-    // Validar que tenga datos
-    if (datos.length === 0) {
-      return res.status(400).json({ error: 'El archivo está vacío' });
-    }
-    
-    // Validar estructura básica
-    const validRows = datos.filter(row => row.orden && row.codigo);
-    if (validRows.length === 0) {
-      return res.status(400).json({ error: 'El archivo debe tener columnas de orden y código' });
-    }
-
-    // Crear backup del archivo actual (si existe)
-    if (fs.existsSync('./orden.xlsx')) {
-      crearBackup('./orden.xlsx');
-    }
-    
-    // Guardar en MongoDB
-    await Orden.deleteMany({});
-    
-    const ordenItems = validRows.map(row => ({
-      orden: parseInt(row.orden) || 999999,
-      codigo: row.codigo ? row.codigo.toString().trim() : ''
-    })).filter(item => item.codigo);
-    
-    await Orden.insertMany(ordenItems);
-    
-    // También guardar el archivo físico como backup
-    fs.writeFileSync('./orden.xlsx', req.file.buffer);
-    
-    // Recargar el orden en memoria
-    await cargarOrdenArticulos();
-    
-    console.log('Archivo orden.xlsx actualizado por admin');
-    res.json({ 
-      success: true, 
-      message: 'Archivo orden.xlsx actualizado correctamente en MongoDB',
-      registros: ordenItems.length
-    });
-    
-  } catch (error) {
-    console.error('Error subiendo orden.xlsx:', error);
-    res.status(500).json({ error: 'Error procesando el archivo: ' + error.message });
-  }
-});
-
-// ENDPOINTS PRINCIPALES
-
-// Obtener grupos
 app.get('/api/grupos', async (req, res) => {
   try {
-    // Intentar cargar desde MongoDB primero
-    const grupos = await Grupo.find();
-    if (grupos.length > 0) {
-      const nombres = [...new Set(grupos.map(g => g.grupo))].sort();
-      res.json({ grupos: nombres });
-    } else {
-      // Fallback a archivo Excel
-      const workbook = XLSX.readFile('./grupos.xlsx');
-      const sheet = workbook.Sheets[workbook.SheetNames[0]];
-      const gruposData = XLSX.utils.sheet_to_json(sheet);
-      const nombres = [...new Set(gruposData.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0))].sort();
-      res.json({ grupos: nombres });
-    }
+    const workbook = XLSX.readFile('./grupos.xlsx');
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const grupos = XLSX.utils.sheet_to_json(sheet);
+    const nombres = [...new Set(grupos.map(row => (row.grupo ? row.grupo.toString().trim() : null)).filter(gr => gr && gr.length > 0))].sort();
+    res.json({ grupos: nombres });
   } catch (err) {
-    console.error('Error obteniendo grupos:', err);
     res.status(500).json({ error: "No se pudieron obtener los grupos." });
   }
 });
 
-// Generar Excel
 app.post('/api/genera-excel-final-async', async (req, res) => {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = req.body;
@@ -499,7 +197,6 @@ app.post('/api/genera-excel-final-async', async (req, res) => {
   }
 });
 
-// Obtener progreso
 app.get('/api/progreso/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -516,7 +213,6 @@ app.get('/api/progreso/:jobId', (req, res) => {
   res.json({ progress: job.progress, error: job.error, filename: job.filename, eta, fase: job.fase });
 });
 
-// Descargar Excel
 app.get('/api/descarga-excel/:jobId', (req, res) => {
   const { jobId } = req.params;
   const job = jobs[jobId];
@@ -527,7 +223,6 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// Función principal para generar Excel
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
@@ -535,28 +230,14 @@ async function generarExcelAsync(params, jobId) {
 
     jobs[jobId].fase = "Preparando grupo y artículos";
 
-    // Obtener códigos del grupo desde MongoDB o archivo
-    let codigosGrupo = [];
-    try {
-      const grupos = await Grupo.find({ grupo: grupo });
-      if (grupos.length > 0) {
-        codigosGrupo = grupos.map(g => g.codigo);
-      } else {
-        // Fallback a archivo Excel
-        const workbookGrupos = XLSX.readFile('./grupos.xlsx');
-        const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
-        const gruposData = XLSX.utils.sheet_to_json(sheetGrupos);
-        codigosGrupo = gruposData
-          .filter(row => row.grupo === grupo)
-          .map(row => (row.codigo ? row.codigo.toString().trim() : null))
-          .filter(Boolean);
-      }
-    } catch (error) {
-      console.error('Error obteniendo códigos del grupo:', error);
-      jobs[jobId].error = "Error obteniendo códigos del grupo.";
-      jobs[jobId].progress = 100;
-      return;
-    }
+    const workbookGrupos = XLSX.readFile('./grupos.xlsx');
+    const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
+    const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
+
+    const codigosGrupo = grupos
+      .filter(row => row.grupo === grupo)
+      .map(row => (row.codigo ? row.codigo.toString().trim() : null))
+      .filter(Boolean);
 
     if (!codigosGrupo.length) {
       jobs[jobId].error = "No hay artículos para ese grupo.";
@@ -592,8 +273,10 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
+    // NUEVA FUNCIONALIDAD: Ordenar artículos según orden.xlsx
     jobs[jobId].fase = "Ordenando artículos según catálogo";
     articulos_base = ordenarArticulos(articulos_base);
+    console.log(`Artículos ordenados: ${articulos_base.length} elementos`);
 
     jobs[jobId].fase = "Descargando descripciones del idioma";
     let descripcionesIdioma = {};
@@ -664,6 +347,7 @@ async function generarExcelAsync(params, jobId) {
 
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
 
+    // Cabecera visual morada
     const headerRow = ws.getRow(1);
     const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
@@ -704,6 +388,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     }
 
+    // Zebra y formato fila datos, EAN font 10 solo en datos
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
@@ -730,12 +415,15 @@ async function generarExcelAsync(params, jobId) {
       }
     }
 
+    // Sección mejorada de inserción de imágenes
     if (!sinImagenes) {
       jobs[jobId].fase = "Insertando imágenes...";
-      const limit = pLimit(3);
+      const limit = pLimit(3); // Reducir concurrencia para mayor estabilidad
       
+      // Crear imagen por defecto
       const imagenPorDefecto = await crearImagenPorDefecto();
       
+      // Tracking de imágenes insertadas
       const imagenesInsertadas = new Set();
       let imagenesExitosas = 0;
       let imagenesConError = 0;
@@ -745,8 +433,10 @@ async function generarExcelAsync(params, jobId) {
         let fotoBuffer = null;
         
         try {
+          // Intentar obtener la imagen del artículo
           fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 3);
           
+          // Si no se pudo obtener, usar imagen por defecto
           if (!fotoBuffer || !validarBuffer(fotoBuffer)) {
             console.log(`Usando imagen por defecto para artículo ${art.codigo}`);
             fotoBuffer = imagenPorDefecto;
@@ -755,10 +445,12 @@ async function generarExcelAsync(params, jobId) {
             imagenesExitosas++;
           }
           
+          // Procesar imagen con Jimp
           const img = await Jimp.read(fotoBuffer);
           img.cover(imagenPx, imagenPx);
           const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
           
+          // Añadir imagen al Excel
           const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
           ws.addImage(imgId, {
             tl: { col: campos.length - 1, row: i + 1 },
@@ -771,6 +463,7 @@ async function generarExcelAsync(params, jobId) {
           console.error(`Error procesando imagen para ${art.codigo}:`, error);
           imagenesConError++;
           
+          // Como último recurso, usar imagen por defecto
           try {
             const img = await Jimp.read(imagenPorDefecto);
             const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
@@ -790,6 +483,10 @@ async function generarExcelAsync(params, jobId) {
         jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
       })));
       
+      // Verificar que todas las filas tienen imagen
+      console.log(`Imágenes insertadas: ${imagenesInsertadas.size}/${articulos_base.length}`);
+      
+      // Si faltan imágenes, intentar completarlas
       for (let i = 0; i < articulos_base.length; i++) {
         if (!imagenesInsertadas.has(i)) {
           console.log(`Completando imagen faltante en fila ${i + 2}`);
@@ -808,6 +505,7 @@ async function generarExcelAsync(params, jobId) {
         }
       }
 
+      // Logging mejorado
       console.log(`Resumen de imágenes:
 - Exitosas: ${imagenesExitosas}
 - Con error: ${imagenesConError}  
@@ -822,6 +520,7 @@ async function generarExcelAsync(params, jobId) {
     jobs[jobId].filename = `listado_${grupo}_${idioma}${sinImagenes ? '_sinImagenes' : ''}.xlsx`;
     jobs[jobId].fase = "Completado";
 
+    // Enviar email si se proporcionó
     if (email) {
       jobs[jobId].fase = "Enviando email...";
       await enviarEmailConAdjunto(email, jobs[jobId].buffer, jobs[jobId].filename);
