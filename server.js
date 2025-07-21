@@ -1,4 +1,4 @@
-// server.js — ATOSA Excel + histórico de altas/bajas de artículos
+// server.js — ATOSA Excel: con histórico semanal de altas/bajas de artículos
 
 const express = require('express');
 const axios = require('axios');
@@ -12,6 +12,7 @@ const pLimit = require('p-limit').default;
 require('dotenv').config();
 const nodemailer = require('nodemailer');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
 
@@ -54,43 +55,60 @@ const usuarios_api = {
   Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
-
 const jobs = {};
 
-// --- Artículos históricos ---
-const HISTORICO_PATH = './historico_articulos.json';
+// --------------- FUNCIONES HISTÓRICO ALTAS/BAJAS (AÑADIDAS) -------------
+const HIST_DIR = './historico_codigos_atosa';
+if (!fs.existsSync(HIST_DIR)) fs.mkdirSync(HIST_DIR);
 
-function loadHistorico() {
-  if (!fs.existsSync(HISTORICO_PATH)) {
-    return { fecha: null, codigos: [] };
-  }
+// Devuelve string con nombre (lunes) de la semana actual o anterior
+function semanaRef(fecha = new Date()) {
+  const d = new Date(fecha);
+  const day = d.getDay(), diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  const monday = new Date(d.setDate(diff));
+  return monday.toISOString().substring(0, 10); // YYYY-MM-DD
+}
+// Devuelve array de códigos guardados esa semana
+function cargarSemana(fechaStr) {
+  const archivo = path.join(HIST_DIR, fechaStr + '.json');
+  if (!fs.existsSync(archivo)) return null;
   try {
-    const data = fs.readFileSync(HISTORICO_PATH, 'utf-8');
-    return JSON.parse(data);
-  } catch (e) {
-    console.error('Error cargando histórico:', e);
-    return { fecha: null, codigos: [] };
+    return JSON.parse(fs.readFileSync(archivo, 'utf-8'));
+  } catch {
+    return null;
   }
 }
-function saveHistorico(codigos) {
-  const data = {
-    fecha: new Date().toISOString(),
-    codigos: codigos
-  };
-  fs.writeFileSync(HISTORICO_PATH, JSON.stringify(data, null, 2));
+// Guarda array de códigos esa semana
+function guardarSemana(codigos, fechaStr) {
+  const archivo = path.join(HIST_DIR, fechaStr + '.json');
+  fs.writeFileSync(archivo, JSON.stringify(codigos, null, 2));
 }
-function compararListas(antes, ahora) {
-  const setAntes = new Set(antes);
-  const setAhora = new Set(ahora);
-  const altas = ahora.filter(c => !setAntes.has(c));
-  const bajas = antes.filter(c => !setAhora.has(c));
-  return { altas, bajas };
+// Devuelve las 2 últimas semanas guardadas ordenadas asc
+function ultimasDosSemanas() {
+  const ficheros = fs.readdirSync(HIST_DIR).filter(f => f.endsWith('.json')).sort();
+  if (ficheros.length < 2) return null;
+  return [ficheros[ficheros.length - 2], ficheros[ficheros.length - 1]];
 }
-function backupHistorico() {
-  if (fs.existsSync(HISTORICO_PATH)) {
-    fs.copyFileSync(HISTORICO_PATH, './historico_anterior.json');
-  }
-}
+
+// ENDPOINT ALTAS/BAJAS
+app.get('/api/altas-bajas', (req, res) => {
+  const semanas = ultimasDosSemanas();
+  if (!semanas) return res.status(400).json({ error: "No hay suficiente histórico comparado." });
+  const anteriores = cargarSemana(semanas[0].replace('.json', '')) || [];
+  const actuales = cargarSemana(semanas[1].replace('.json', '')) || [];
+  const setAnt = new Set(anteriores);
+  const setAct = new Set(actuales);
+  const altas = actuales.filter(c => !setAnt.has(c));
+  const bajas = anteriores.filter(c => !setAct.has(c));
+  res.json({
+    semana_anterior: semanas[0].replace('.json', ''),
+    semana_actual: semanas[1].replace('.json', ''),
+    altas,
+    bajas,
+    totales: { nuevas: altas.length, eliminadas: bajas.length }
+  });
+});
+// ------------------------------------------------------------------------
 
 // --- Nueva funcionalidad: Cargar orden de artículos ---
 let ordenArticulos = {};
@@ -123,7 +141,6 @@ function ordenarArticulos(articulos) {
     return ordenA - ordenB;
   });
 }
-// --- Al iniciar el servidor carga el orden del excel ---
 cargarOrdenArticulos();
 
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
@@ -140,7 +157,6 @@ async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
         if (buffer.length > 0) return buffer;
       }
     } catch (e) {
-      console.log(`Intento ${i + 1} fallido para imagen ${codigo}:`, e.message);
       if (i < intentos - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
@@ -183,7 +199,7 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   }
 }
 
-// ------------------ ENDPOINTS ---------------------------
+// ------------------ ENDPOINTS ORIGINALES ---------------------------
 
 // Grupos disponibles
 app.get('/api/grupos', async (req, res) => {
@@ -234,7 +250,7 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// Generador asíncrono de Excel
+// Generador asíncrono de Excel (AQUÍ se añade el guardado semanal)
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
@@ -280,16 +296,11 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    //================= HISTÓRICO: SOLO SE AÑADE ESTA PARTE ==================
-    const codigosActuales = articulos_base.map(art => (art.codigo ? art.codigo.toString().trim() : null)).filter(Boolean);
-    const historico = loadHistorico();
-    const codigosAnteriores = historico.codigos || [];
-    const { altas, bajas } = compararListas(codigosAnteriores, codigosActuales);
-    backupHistorico();
-    saveHistorico(codigosActuales);
-    //=======================================================================
+    // ----------- AÑADIDO: GUARDADO SEMANAL DE CÓDIGOS -----------
+    const todosCodigos = resp0.data.map(art => art.codigo?.toString().trim()).filter(Boolean);
+    guardarSemana(todosCodigos, semanaRef());
+    // ------------------------------------------------------------
 
-    // === Resto de lógica de generación Excel ===
     jobs[jobId].fase = "Ordenando artículos según catálogo";
     articulos_base = ordenarArticulos(articulos_base);
 
@@ -387,7 +398,6 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     }
 
-    // Zebra y formato fila datos, EAN font 10 solo en datos
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
@@ -413,7 +423,7 @@ async function generarExcelAsync(params, jobId) {
 
     if (!sinImagenes) {
       jobs[jobId].fase = "Insertando imágenes...";
-      const limit = pLimit(3); // Control concurrencia
+      const limit = pLimit(3);
       const imagenPorDefecto = await crearImagenPorDefecto();
       const imagenesInsertadas = new Set();
       let imagenesExitosas = 0, imagenesConError = 0, imagenesDefault = 0;
@@ -462,29 +472,7 @@ async function generarExcelAsync(params, jobId) {
   }
 }
 
-// ============ ENDPOINT HISTÓRICO =============
-app.get('/api/cambios-articulos', (req, res) => {
-  const historico = loadHistorico();
-  const codigosActuales = historico.codigos || [];
-  let codigosAnteriores = [];
-  if (fs.existsSync('./historico_anterior.json')) {
-    codigosAnteriores = JSON.parse(fs.readFileSync('./historico_anterior.json', 'utf-8')).codigos || [];
-  } else {
-    codigosAnteriores = codigosActuales;
-  }
-  const { altas, bajas } = compararListas(codigosAnteriores, codigosActuales);
-  res.json({
-    resumen: {
-      numAltas: altas.length,
-      numBajas: bajas.length
-    },
-    nuevas: altas,
-    bajas: bajas
-  });
-});
-
 app.get('/', (req, res) => res.send('Servidor ATOSA backend funcionando.'));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Escuchando en puerto ${PORT}`));
-
