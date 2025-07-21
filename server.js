@@ -1,4 +1,4 @@
-// server.js — ATOSA Excel: con histórico semanal de altas/bajas de artículos
+// server.js — ATOSA Excel: cabecera morada, datos EAN font 10, imágenes encajadas, alto de fila 82.0 puntos Excel
 
 const express = require('express');
 const axios = require('axios');
@@ -11,8 +11,6 @@ const Jimp = require('jimp');
 const pLimit = require('p-limit').default;
 require('dotenv').config();
 const nodemailer = require('nodemailer');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 
@@ -27,7 +25,7 @@ app.use(express.json());
 
 // --- Config fijar alto de filas ---
 const imagenPx = 110;
-const filaAltura = 82.0; // Altura de fila Excel
+const filaAltura = 82.0; // ← Altura de fila Excel
 
 const diccionario_traduccion = {
   Español: {
@@ -49,68 +47,15 @@ const diccionario_traduccion = {
 };
 
 const usuarios_api = {
-  Español: { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
-  Inglés: { usuario: "ingles@atosa.es", password: "AtosaIngles" },
-  Francés: { usuario: "frances@atosa.es", password: "AtosaFrances" },
-  Italiano: { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
+  Español:   { usuario: "amazon@espana.es", password: "0glLD6g7Dg" },
+  Inglés:    { usuario: "ingles@atosa.es", password: "AtosaIngles" },
+  Francés:   { usuario: "frances@atosa.es", password: "AtosaFrances" },
+  Italiano:  { usuario: "italiano@atosa.es", password: "AtosaItaliano" }
 };
 const usuario8 = { usuario: "santi@tradeinn.com", password: "C8Zg1wqgfe" };
 const jobs = {};
 
-// --------------- FUNCIONES HISTÓRICO ALTAS/BAJAS (AÑADIDAS) -------------
-const HIST_DIR = './historico_codigos_atosa';
-if (!fs.existsSync(HIST_DIR)) fs.mkdirSync(HIST_DIR);
-
-// Devuelve string con nombre (lunes) de la semana actual o anterior
-function semanaRef(fecha = new Date()) {
-  const d = new Date(fecha);
-  const day = d.getDay(), diff = d.getDate() - day + (day === 0 ? -6 : 1);
-  const monday = new Date(d.setDate(diff));
-  return monday.toISOString().substring(0, 10); // YYYY-MM-DD
-}
-// Devuelve array de códigos guardados esa semana
-function cargarSemana(fechaStr) {
-  const archivo = path.join(HIST_DIR, fechaStr + '.json');
-  if (!fs.existsSync(archivo)) return null;
-  try {
-    return JSON.parse(fs.readFileSync(archivo, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
-// Guarda array de códigos esa semana
-function guardarSemana(codigos, fechaStr) {
-  const archivo = path.join(HIST_DIR, fechaStr + '.json');
-  fs.writeFileSync(archivo, JSON.stringify(codigos, null, 2));
-}
-// Devuelve las 2 últimas semanas guardadas ordenadas asc
-function ultimasDosSemanas() {
-  const ficheros = fs.readdirSync(HIST_DIR).filter(f => f.endsWith('.json')).sort();
-  if (ficheros.length < 2) return null;
-  return [ficheros[ficheros.length - 2], ficheros[ficheros.length - 1]];
-}
-
-// ENDPOINT ALTAS/BAJAS
-app.get('/api/altas-bajas', (req, res) => {
-  const semanas = ultimasDosSemanas();
-  if (!semanas) return res.status(400).json({ error: "No hay suficiente histórico comparado." });
-  const anteriores = cargarSemana(semanas[0].replace('.json', '')) || [];
-  const actuales = cargarSemana(semanas[1].replace('.json', '')) || [];
-  const setAnt = new Set(anteriores);
-  const setAct = new Set(actuales);
-  const altas = actuales.filter(c => !setAnt.has(c));
-  const bajas = anteriores.filter(c => !setAct.has(c));
-  res.json({
-    semana_anterior: semanas[0].replace('.json', ''),
-    semana_actual: semanas[1].replace('.json', ''),
-    altas,
-    bajas,
-    totales: { nuevas: altas.length, eliminadas: bajas.length }
-  });
-});
-// ------------------------------------------------------------------------
-
-// --- Nueva funcionalidad: Cargar orden de artículos ---
+// --- NUEVA FUNCIONALIDAD: Cargar orden de artículos ---
 let ordenArticulos = {};
 function cargarOrdenArticulos() {
   try {
@@ -129,11 +74,12 @@ function cargarOrdenArticulos() {
     ordenArticulos = {};
   }
 }
+
 function ordenarArticulos(articulos) {
   return articulos.sort((a, b) => {
     const codigoA = a.codigo ? a.codigo.toString().trim() : '';
     const codigoB = b.codigo ? b.codigo.toString().trim() : '';
-    const ordenA = ordenArticulos[codigoA] || 999999;
+    const ordenA = ordenArticulos[codigoA] || 999999; // Si no existe, va al final
     const ordenB = ordenArticulos[codigoB] || 999999;
     if (ordenA === ordenB) {
       return codigoA.localeCompare(codigoB);
@@ -141,6 +87,8 @@ function ordenarArticulos(articulos) {
     return ordenA - ordenB;
   });
 }
+
+// --- Al iniciar el servidor carga el orden del excel ---
 cargarOrdenArticulos();
 
 async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
@@ -157,23 +105,27 @@ async function obtenerFotoArticuloAPI(codigo, usuario, password, intentos = 3) {
         if (buffer.length > 0) return buffer;
       }
     } catch (e) {
+      console.log(`Intento ${i + 1} fallido para imagen ${codigo}:`, e.message);
       if (i < intentos - 1) await new Promise(r => setTimeout(r, 1000 * (i + 1)));
     }
   }
   return null;
 }
+
 function validarBuffer(buffer) {
   if (!buffer || buffer.length === 0) return false;
   const jpegHeader = buffer.slice(0, 2).toString('hex') === 'ffd8';
   const pngHeader = buffer.slice(0, 8).toString('hex') === '89504e470d0a1a0a';
   return jpegHeader || pngHeader;
 }
+
 async function crearImagenPorDefecto() {
   const img = new Jimp(imagenPx, imagenPx, '#f0f0f0');
   const font = await Jimp.loadFont(Jimp.FONT_SANS_16_BLACK);
-  img.print(font, 10, imagenPx / 2 - 10, 'Sin imagen');
+  img.print(font, 10, imagenPx/2 - 10, 'Sin imagen');
   return await img.getBufferAsync(Jimp.MIME_JPEG);
 }
+
 async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   const transporter = nodemailer.createTransport({
     service: 'gmail',
@@ -199,7 +151,7 @@ async function enviarEmailConAdjunto(emailDestino, bufferExcel, filename) {
   }
 }
 
-// ------------------ ENDPOINTS ORIGINALES ---------------------------
+// ------------------ ENDPOINTS ---------------------------
 
 // Grupos disponibles
 app.get('/api/grupos', async (req, res) => {
@@ -250,16 +202,16 @@ app.get('/api/descarga-excel/:jobId', (req, res) => {
   res.send(job.buffer);
 });
 
-// Generador asíncrono de Excel (AQUÍ se añade el guardado semanal)
+// Generador asíncrono de Excel
 async function generarExcelAsync(params, jobId) {
   try {
     const { grupo, idioma = "Español", descuento = 0, soloStock = false, sinImagenes = false, email } = params;
     const maxFilas = 3500;
     jobs[jobId].fase = "Preparando grupo y artículos";
+
     const workbookGrupos = XLSX.readFile('./grupos.xlsx');
     const sheetGrupos = workbookGrupos.Sheets[workbookGrupos.SheetNames[0]];
     const grupos = XLSX.utils.sheet_to_json(sheetGrupos);
-
     const codigosGrupo = grupos.filter(row => row.grupo === grupo)
       .map(row => (row.codigo ? row.codigo.toString().trim() : null))
       .filter(Boolean);
@@ -269,6 +221,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = 100;
       return;
     }
+
     jobs[jobId].fase = "Descargando artículos base";
     const { usuario, password } = usuarios_api["Español"];
     const apiURL = "https://b2b.atosa.es:880/api/articulos/";
@@ -284,6 +237,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = 100;
       return;
     }
+
     let articulos_base = resp0.data
       .filter(art =>
         codigosGrupo.includes(art.codigo?.toString().trim()) &&
@@ -296,11 +250,7 @@ async function generarExcelAsync(params, jobId) {
       return;
     }
 
-    // ----------- AÑADIDO: GUARDADO SEMANAL DE CÓDIGOS -----------
-    const todosCodigos = resp0.data.map(art => art.codigo?.toString().trim()).filter(Boolean);
-    guardarSemana(todosCodigos, semanaRef());
-    // ------------------------------------------------------------
-
+    // Ordenar artículos según catálogo
     jobs[jobId].fase = "Ordenando artículos según catálogo";
     articulos_base = ordenarArticulos(articulos_base);
 
@@ -343,7 +293,10 @@ async function generarExcelAsync(params, jobId) {
           if (cod) precios8[cod] = parseFloat(art.precioVenta);
         }
         for (const cod of Object.keys(precios0)) {
-          if (precios8[cod] !== undefined && Math.abs(precios0[cod] - precios8[cod]) < 0.01) {
+          if (
+            precios8[cod] !== undefined &&
+            Math.abs(precios0[cod] - precios8[cod]) < 0.01
+          ) {
             articulos_promocion.add(cod);
           }
         }
@@ -358,9 +311,12 @@ async function generarExcelAsync(params, jobId) {
     const workbook = new ExcelJS.Workbook();
     const ws = workbook.addWorksheet('Listado');
     ws.addRow(traducido);
-    const colWidths = { codigo: 11, descripcion: 30, disponible: 10, ean13: 10, precioVenta: 10, umv: 8, imagen: 15 };
+    const colWidths = {
+      codigo: 11, descripcion: 30, disponible: 10, ean13: 10,
+      precioVenta: 10, umv: 8, imagen: 15
+    };
     ws.columns = campos.map(c => ({ width: colWidths[c] || 15 }));
-
+    // Cabecera visual morada
     const headerRow = ws.getRow(1);
     const cabeceraColor = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF7C3AED' } };
     headerRow.font = { bold: true, size: 15, color: { argb: 'FFFFFFFF' }, name: 'Segoe UI' };
@@ -373,7 +329,6 @@ async function generarExcelAsync(params, jobId) {
     });
 
     const idxEAN = campos.indexOf("ean13") + 1;
-
     let pasoTotal = sinImagenes ? articulos_base.length : articulos_base.length * 2;
     let pasos = 0;
 
@@ -398,6 +353,7 @@ async function generarExcelAsync(params, jobId) {
       jobs[jobId].progress = Math.round((pasos / pasoTotal) * 97);
     }
 
+    // Zebra y formato fila datos, EAN font 10 solo en datos
     for (let i = 2; i <= ws.rowCount; i++) {
       const row = ws.getRow(i);
       row.height = filaAltura;
@@ -423,15 +379,17 @@ async function generarExcelAsync(params, jobId) {
 
     if (!sinImagenes) {
       jobs[jobId].fase = "Insertando imágenes...";
-      const limit = pLimit(3);
+      const limit = pLimit(3); // Reducir concurrencia
       const imagenPorDefecto = await crearImagenPorDefecto();
       const imagenesInsertadas = new Set();
       let imagenesExitosas = 0, imagenesConError = 0, imagenesDefault = 0;
+
       await Promise.all(articulos_base.map((art, i) => limit(async () => {
         let fotoBuffer = null;
         try {
           fotoBuffer = await obtenerFotoArticuloAPI(art.codigo, usuarios_api["Español"].usuario, usuarios_api["Español"].password, 3);
           if (!fotoBuffer || !validarBuffer(fotoBuffer)) {
+            console.log(`Usando imagen por defecto para artículo ${art.codigo}`);
             fotoBuffer = imagenPorDefecto; imagenesDefault++;
           } else {
             imagenesExitosas++;
@@ -446,11 +404,44 @@ async function generarExcelAsync(params, jobId) {
           });
           imagenesInsertadas.add(i);
         } catch (error) {
+          console.error(`Error procesando imagen para ${art.codigo}:`, error);
           imagenesConError++;
+          try {
+            const img = await Jimp.read(imagenPorDefecto);
+            const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
+            const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
+            ws.addImage(imgId, {
+              tl: { col: campos.length - 1, row: i + 1 },
+              ext: { width: imagenPx, height: imagenPx }
+            });
+            imagenesInsertadas.add(i); imagenesDefault++;
+          } catch (fallbackError) {
+            console.error(`Error crítico con imagen por defecto para ${art.codigo}:`, fallbackError);
+          }
         }
         pasos++;
         jobs[jobId].progress = Math.max(jobs[jobId].progress, Math.round((pasos / pasoTotal) * 99));
       })));
+
+      // Completar imágenes posibles faltantes
+      for (let i = 0; i < articulos_base.length; i++) {
+        if (!imagenesInsertadas.has(i)) {
+          try {
+            const img = await Jimp.read(imagenPorDefecto);
+            const buffer = await img.getBufferAsync(Jimp.MIME_JPEG);
+            const imgId = workbook.addImage({ buffer, extension: 'jpeg' });
+            ws.addImage(imgId, {
+              tl: { col: campos.length - 1, row: i + 1 },
+              ext: { width: imagenPx, height: imagenPx }
+            });
+            imagenesDefault++;
+          } catch (error) {
+            console.error(`Error añadiendo imagen de respaldo en fila ${i + 2}:`, error);
+          }
+        }
+      }
+
+      console.log(`Resumen de imágenes:\n- Exitosas: ${imagenesExitosas}\n- Con error: ${imagenesConError}\n- Por defecto: ${imagenesDefault}\n- Total: ${articulos_base.length}`);
     }
 
     jobs[jobId].fase = "Finalizando";
@@ -473,6 +464,5 @@ async function generarExcelAsync(params, jobId) {
 }
 
 app.get('/', (req, res) => res.send('Servidor ATOSA backend funcionando.'));
-
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Escuchando en puerto ${PORT}`));
